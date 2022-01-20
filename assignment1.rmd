@@ -1,0 +1,34 @@
+
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+df = read_csv("Cook_County_Assessor_s_Residential_Modeling_Characteristics__Chicago_.csv")
+df
+```
+
+```{r}
+names(df)
+```
+
+How many single family homes are included in the data? 
+Out of all the residential properties, what is the most common class? 
+
+```{r}
+df %>% 
+  group_by(Use) %>%
+  count() %>%
+  filter(Use == 'Single-Family')
+```
+
+```{r}
+df %>%
+  group_by(`Property Class`) %>%
+  count() %>%
+  ungroup() %>%
+  slice_max(n)
+```
+
+

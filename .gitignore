@@ -48,4 +48,4 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-./Cook_County_Assessor_s_Residential_Modeling_Characteristics__Chicago_.csv
+*.csv
