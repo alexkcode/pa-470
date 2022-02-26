@@ -8,12 +8,21 @@ output:
     theme: sandstone
 ---
 
+```{r include=FALSE}
+# for use in part 2
+# devtools::install_github("tidymodels/discrim")
+install.packages("discrim")
+install.packages("parsnip")
+```
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
 library(tidyverse)
 library(tidymodels)
 library(kableExtra)
 library(lubridate)
+library(parsnip)
+library(discrim)
 
 #example connection to database. note that you have to download the database from onedrive
 
@@ -25,6 +34,8 @@ assessments <- dplyr::tbl(con, 'assessments') %>% collect()
 sales <- dplyr::tbl(con, 'sales') %>% collect()
 parcels <- dplyr::tbl(con, 'parcels') %>% collect()
 ```
+
+# Part 1: Regression on Sales and Foreclosures
 
 ## Section A
 
@@ -260,5 +271,57 @@ model_fit <- foreclosure_workflow %>%
 
 model_fit %>% glance()
 model_fit %>% tidy()
+```
+
+
+
+```{r include=FALSE}
+remove(foreclosures)
+remove(foreclosures_chars)
+remove(parcels_subset)
+remove(glm_model)
+remove(foreclosure_recipe)
+remove(foreclosure_workflow)
+remove(model_fit)
+```
+
+# Part 2: Classification
+
+## Part A
+
+## Part B: Overassessment Classification
+
+First, we want to find a way to identify if a home is likely to be overassessed in a given year. We will analyze homes and assessments from 2016. Use 2016 sales and assessments with the parcels property characteristics (note that we only know if a home was overassessed if it sold). Create a classification metric of overassessment based on properties which sold and use this as your dependent variable.
+
+```{r}
+assessments_2016 = 
+  assessments %>%
+  filter(year == 2016)
+
+head(assessments_2016)
+```
+
+```{r}
+assessments_B =
+  assessments_2016 %>%
+  left_join(parcels, by = c('PARCELNO'='parcel_number'))
+
+head(assessments_B)
+```
+
+
+```{r overassessment workflow}
+nb_model = 
+  naive_Bayes() %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes")
+
+over_workflow = 
+  workflow() %>%
+  add_model(nb_model)
+```
+
+```{r overassessment preproc}
+
 ```
 
