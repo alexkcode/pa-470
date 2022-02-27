@@ -1,0 +1,97 @@
+---
+title: "coding_warmup_4"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Part A
+
+```{r }
+library(tidyverse)
+library(tidymodels)
+tidymodels_prefer()
+
+theme_set(theme_bw())
+
+data(bivariate)
+
+ggplot(bivariate_train, aes(x=A, y=B, color=Class)) +
+  geom_point(alpha=.3)
+```
+
+```{r}
+model_1 =
+  logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification") %>%
+  fit(Class ~ A * B, data = bivariate_train)
+
+model_1 %>% tidy()
+```
+
+## Part B
+
+```{r}
+test_pred <- augment(model_1, bivariate_test)
+test_pred
+```
+
+## Part C
+
+```{r}
+# log_model, your parnsip model
+# bivariate_train / bivariate_val, data from bivariate
+
+# to plot the countour we need to create a grid of points and get the model prediction at each point
+x_grid <-
+  expand.grid(A = seq(min(bivariate_train$A), max(bivariate_train$A), length.out = 100),
+              B = seq(min(bivariate_train$B), max(bivariate_train$B), length.out = 100))
+x_grid_preds <- model_1 %>% augment(x_grid)
+
+# plot predictions from grid as countour and validation data on plot
+ggplot(x_grid_preds, aes(x = A, y = B)) + 
+  geom_contour(aes(z = .pred_One), breaks = .5, col = "black") + 
+  geom_point(data = bivariate_val, aes(col = Class), alpha = 0.3)
+```
+
+## Part D
+
+Evaluate your model using the following functions (which dataset(s) should you use to do this train, test, or validation). See if you can provide a basic interpretation of the measures.
+
+- roc_auc
+- accuracy
+- roc_curve and autoplot
+- f_meas
+
+```{r}
+two_class_curve = roc_curve(test_pred, Class, .pred_One)
+autoplot(two_class_curve)
+```
+
+
+```{r}
+accuracy(test_pred, Class, .pred_class)
+```
+
+```{r}
+f_meas(test_pred, Class, .pred_class)
+```
+
+## Part E
+
+```{r}
+conf_mat(test_pred, Class, .pred_class) %>%
+  autoplot("heatmap")
+```
+
+
+
+## Including Plots
+
+```{r pressure, echo=FALSE}
+
+```
+
