@@ -4,6 +4,8 @@
 library(tidyverse)
 ```
 
+# Part 1
+
 ```{r}
 df = read_csv("Cook_County_Assessor_s_Residential_Modeling_Characteristics__Chicago_.csv")
 df
@@ -13,22 +15,47 @@ df
 names(df)
 ```
 
+```{r}
+library(stringr)
+
+names(df) = tolower(str_replace_all(pattern = "[ \\t\\s]", replacement = "_", string = names(df)))
+names(df) = str_replace_all(string = names(df), pattern = "[^a-z0-9_]+", replacement = "")
+names(df) = str_replace_all(string = names(df), pattern = "__", replacement = "_")
+names(df)
+```
+
+
+# Part 2
+
 How many single family homes are included in the data? 
 Out of all the residential properties, what is the most common class? 
 
 ```{r}
 df %>% 
-  group_by(Use) %>%
+  group_by(use) %>%
   count() %>%
   filter(Use == 'Single-Family')
 ```
 
 ```{r}
 df %>%
-  group_by(`Property Class`) %>%
+  group_by(property_class) %>%
   count() %>%
   ungroup() %>%
   slice_max(n)
 ```
 
+# Part 3
+
+Using lubridate, calculate some information on sales:
+
+- Number of sales in any January
+- Number of sales in 2020
+- Number of sales on January 2020
+- Number of sales on your birthday (or favorite day)
+- Number of sales on Wednesday (or your favorite day of the week)
+
+```{r}
+
+```
 

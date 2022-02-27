@@ -1,0 +1,333 @@
+---
+title: "Part 2"
+author: "Alexis Kwan"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: paged
+    theme: sandstone
+---
+
+```{r include=FALSE}
+# for use in part 2
+# devtools::install_github("tidymodels/discrim")
+install.packages("discrim")
+install.packages("parsnip")
+install.packages("naivebayes")
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+library(tidyverse)
+library(tidymodels)
+library(kableExtra)
+library(lubridate)
+library(parsnip)
+library(discrim)
+
+#example connection to database. note that you have to download the database from onedrive
+
+con <- DBI::dbConnect(RSQLite::SQLite(), "../database/detroit.sqlite")
+```
+
+```{r include=FALSE}
+assessments <- dplyr::tbl(con, 'assessments') %>% collect()
+sales <- dplyr::tbl(con, 'sales') %>% collect()
+parcels <- dplyr::tbl(con, 'parcels') %>% collect()
+```
+
+# Part 1: Regression on Sales and Foreclosures
+
+## Section A
+
+```{r}
+# sales tbl
+
+# dplyr::tbl(con, 'sales')
+
+# convert to tibble
+dplyr::tbl(con, 'sales') %>% dplyr::collect()
+
+# sql query
+
+dplyr::tbl(con, 'sales') %>% count(year(sale_date))
+
+#dplyr::tbl(con, 'sales') %>% count(year(sale_date)) %>% show_query()
+
+```
+
+```{r}
+dplyr::tbl(con, 'assessments')
+```
+
+```{r}
+joined = 
+  sales %>%
+  mutate(year = year(ymd(sale_date))) %>%
+  left_join(assessments, by=c('parcel_num'='PARCELNO', 'year')) %>%
+  left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel"))
+
+joined = joined %>%
+  mutate(property_c = as.character(property_c),
+         propclass = as.character(propclass))
+
+# filter just by one propclass (since they are incomparable across classes)
+# filter_regex = regex(pattern = ".*(apt|family|condo|residential).*", ignore_case = T)
+joined = joined %>% filter(propclass == 401)
+
+head(joined %>% arrange(parcel_num))
+```
+
+```{r}
+joined %>%
+  filter(sale_price < 1000) %>%
+  ggplot(aes(x = sale_price)) +
+  geom_histogram()
+```
+
+```{r}
+joined %>%
+  filter(sale_price < 1000) %>%
+  ggplot(aes(x = ASSESSEDVALUE)) +
+  geom_histogram()
+```
+
+```{r}
+joined %>%
+  group_by(sale_terms) %>%
+  count() %>% 
+  arrange(desc(n))
+```
+
+```{r}
+joined %>%
+  filter(sale_terms %in% c('NO CONSIDERATION', 'EXEMPT/GOVT')) %>%
+  ggplot(aes(x = ASSESSEDVALUE)) +
+  geom_boxplot() + 
+  xlim(0, 40000) 
+```
+
+As we can see from the histogram above, there are many properties sold at strange values, like at 0 or 1 dollar. This could have been a part of some revitalization program where property is sold cheaply to residents or reclaimed by the city, as evidenced by the grantor being some government entity like *CITY OF DETROIT* and sale terms like *EXEMPT/GOVT* but there isn't enough information confirm the strange values. The is true of assessed values as well. What does it mean for a property to have a zero assessed value? Considering that even "arm's length" transactions have this issue, there appears to be a potential data ingestion issue.
+
+```{r}
+joined %>%  
+  collect() %>%
+  filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
+  filter(sale_price < 1000) %>%
+  ggplot(aes(x = ASSESSEDVALUE)) +
+  geom_histogram()
+```
+
+But according to the definition of the various sales terms, only "arm's length" sales are supposedly representative of the market. So we will examine only those. For the sake of simplicity let's restrict the data to the valuations to the lower half first initial inspection.
+
+```{r}
+joined %>%
+  collect() %>%
+  filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
+  filter(ASSESSEDVALUE > 4000 & ASSESSEDVALUE < 20000) %>%
+  pivot_longer(cols = c('sale_price','ASSESSEDVALUE'), names_to = "type", values_to = "value") %>%
+  ggplot(aes(x=value, fill=type)) +
+  geom_histogram(alpha=0.5, position = 'identity', binwidth = 1000) +
+  xlim(0, 100000)
+```
+
+Here we note a sharp difference in the shapes of the distribution of the assessment values versus actual sale values. Also, strangely, there appears to be a sharp cutoff around $\$20,000$ in the assessed values samples.
+
+As the University of Chicago analysts note, the typical way to examine fairness of assessments is through the ratios of the assessed values divided by the sales price.
+
+## Section B
+
+```{r}
+library(cmfproperty)
+library(lubridate)
+
+ratios =
+  cmfproperty::reformat_data(
+    joined %>%
+      collect() %>%
+      filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
+      mutate(sale_year = year(ymd(sale_date))),
+    sale_col = "sale_price",
+    assessment_col = "ASSESSEDVALUE",
+    sale_year_col = "sale_year",
+  ) %>%
+  arrange(desc(parcel_num), year)
+
+head(ratios)
+```
+
+```{r}
+stats = calc_iaao_stats(ratios)
+stats
+```
+
+
+```{r}
+min_reporting_yr = 2012
+max_reporting_yr = 2020
+jurisdiction_name = "Detroit"
+```
+
+```{r}
+d_plots = diagnostic_plots(stats, ratios, min_reporting_yr, max_reporting_yr)
+```
+
+```{r}
+gridExtra::grid.arrange(d_plots[[2]],
+                        d_plots[[3]],
+                        d_plots[[4]],
+                        d_plots[[5]],
+                        ncol = 2,
+                        nrow = 2)
+```
+
+Looking at the various trends in sales ratios over time we see that, no matter how expensive the property is, the sales ratio and the assessed value decreases over time, while the actual sales price increases, especially from 2016 onwards.
+
+## Section C Sales Prediction
+
+```{r}
+df = 
+  joined %>%
+  collect() %>%
+  filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
+  mutate(year = as.factor(year))
+  # filter(propclass %in% c())
+```
+
+```{r}
+df %>%
+  group_by(propclass) %>%
+  count()
+```
+
+```{r}
+sales_lm = lm(formula = sale_price ~ property_c, data = df)
+
+summary(sales_lm)
+```
+
+```{r}
+sales_lm = lm(formula = sale_price ~ ASSESSEDVALUE, data = df)
+
+summary(sales_lm)
+```
+
+```{r}
+sales_lm = lm(formula = sale_price ~ property_c + ASSESSEDVALUE + year, data = df)
+
+summary(sales_lm)
+```
+
+We see from regressions that using what we would intuitively associate with higher property values, like assessed value and property are statistically significant predictors of sales. 
+
+## Section D Foreclosure Prediction
+
+```{r}
+foreclosures <- tbl(con, 'foreclosures') %>%
+  collect() %>%
+  select(-prop_addr) %>%
+  pivot_longer(!prop_parcelnum, names_to='year', values_to='foreclosed') %>%
+  filter(!is.na(foreclosed)) %>%
+  distinct()
+
+head(foreclosures, 5)
+```
+
+```{r}
+parcels_subset = parcels %>% select(parcel_number, total_square_footage, year_built, zip_code)
+
+foreclosures_chars <- 
+  assessments %>%
+  mutate(year = as.character(year)) %>%
+  filter(propclass == 401) %>%
+  left_join(foreclosures, by=c('PARCELNO'='prop_parcelnum', 'year')) %>%
+  left_join(parcels_subset, by=c('PARCELNO'='parcel_number')) %>%
+  mutate(foreclosed = replace_na(foreclosed, 0),
+         foreclosed = as.factor(foreclosed),
+         zip_code = as.factor(zip_code))
+
+head(foreclosures_chars, 5)
+```
+
+```{r}
+glm_model <-
+  parsnip::logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode('classification')
+
+foreclosure_recipe <-
+  recipe(foreclosed ~ total_square_footage + year_built + zip_code,
+         data = foreclosures_chars) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+foreclosure_workflow <-
+  workflow() %>%
+  add_model(glm_model) %>%
+  add_recipe(foreclosure_recipe)
+
+model_fit <- foreclosure_workflow %>%
+  fit(data=foreclosures_chars %>% slice_sample(n=10000))
+
+model_fit %>% glance()
+model_fit %>% tidy()
+```
+
+
+
+```{r include=FALSE}
+remove(foreclosures)
+remove(foreclosures_chars)
+remove(parcels_subset)
+remove(glm_model)
+remove(foreclosure_recipe)
+remove(foreclosure_workflow)
+remove(model_fit)
+```
+
+# Part 2: Classification
+
+## Part A
+
+## Part B: Overassessment Classification
+
+First, we want to find a way to identify if a home is likely to be overassessed in a given year. We will analyze homes and assessments from 2016. Use 2016 sales and assessments with the parcels property characteristics (note that we only know if a home was overassessed if it sold). Create a classification metric of overassessment based on properties which sold and use this as your dependent variable.
+
+```{r overassessment workflow}
+nb_model = 
+  naive_Bayes() %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes")
+
+over_workflow = 
+  workflow() %>%
+  add_model(nb_model)
+
+ratios_2016 = 
+  ratios %>% 
+  mutate(overassessed = as.factor(if_else(RATIO > 0.5, 1, 0))) %>%
+  filter(year == 2016)
+
+over_recipe =
+  recipe(overassessed ~ zip_code + property_class_desc + use_code + total_square_footage + year_built + is_improved, data=ratios_2016) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+  
+over_workflow =
+  over_workflow %>%
+  add_recipe(over_recipe)
+
+ratios_split = initial_split(ratios_2016)
+
+ratios_train = training(ratios_split)
+ratios_test = testing(ratios_split)
+```
+
+
+```{r overassessment workflow}
+model_fit = over_workflow %>%
+  fit(data=ratios_train)
+
+model_fit
+```
+
