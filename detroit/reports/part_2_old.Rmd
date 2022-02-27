@@ -42,28 +42,11 @@ foreclosures <- dplyr::tbl(con, 'foreclosures') %>%
   filter(!is.na(foreclosed)) %>%
   distinct()
 
-joined = 
-  sales %>%
-  mutate(year = year(ymd(sale_date))) %>%
-  left_join(assessments, by=c('parcel_num'='PARCELNO', 'year')) %>%
-  left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel")) %>%
-  mutate(property_c = as.character(property_c),
-         propclass = as.character(propclass),
-         year = as.character(year)) %>% 
-  filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) %>%
-  filter(propclass == 401)
-
-joined_mini = 
-  joined %>%
-  filter(property_c == 401,
-         sale_price >= 2000,
-         ASSESSEDVALUE >= 1000,
-         str_detect(str_to_lower(sale_terms), 'valid arm')) %>%
-  left_join(foreclosures, by=c('parcel_num'='prop_parcelnum', 'year'))
-
 ratios =
   cmfproperty::reformat_data(
     joined %>%
+      collect() %>%
+      filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
       mutate(sale_year = year(ymd(sale_date))),
     sale_col = "sale_price",
     assessment_col = "ASSESSEDVALUE",
@@ -77,6 +60,24 @@ stats = calc_iaao_stats(ratios)
 # Part 2: Classification
 
 ## Part A: Introduction
+
+```{r}
+joined = 
+  sales %>%
+  mutate(year = year(ymd(sale_date))) %>%
+  left_join(assessments, by=c('parcel_num'='PARCELNO', 'year')) %>%
+  left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel"))
+
+joined = joined %>%
+  mutate(property_c = as.character(property_c),
+         propclass = as.character(propclass))
+
+# filter just by one propclass (since they are incomparable across classes)
+# filter_regex = regex(pattern = ".*(apt|family|condo|residential).*", ignore_case = T)
+joined = joined %>% filter(propclass == 401)
+
+head(joined %>% arrange(parcel_num))
+```
 
 ```{r}
 joined %>%
@@ -98,6 +99,16 @@ joined %>%
   count() %>% 
   arrange(desc(n))
 ```
+
+```{r}
+joined %>%
+  filter(sale_terms %in% c('NO CONSIDERATION', 'EXEMPT/GOVT')) %>%
+  ggplot(aes(x = ASSESSEDVALUE)) +
+  geom_boxplot() + 
+  xlim(0, 40000) 
+```
+
+As we can see from the histogram above, there are many properties sold at strange values, like at 0 or 1 dollar. This could have been a part of some revitalization program where property is sold cheaply to residents or reclaimed by the city, as evidenced by the grantor being some government entity like *CITY OF DETROIT* and sale terms like *EXEMPT/GOVT* but there isn't enough information confirm the strange values. The is true of assessed values as well. What does it mean for a property to have a zero assessed value? Considering that even "arm's length" transactions have this issue, there appears to be a potential data ingestion issue.
 
 ```{r}
 joined %>%  
@@ -161,6 +172,14 @@ remove(foreclosure_workflow)
 remove(model_fit)
 ```
 
+```{r}
+joined_mini <- joined %>%
+  filter(property_c == 401,
+         sale_price >= 2000,
+         ASSESSEDVALUE >= 1000,
+         str_detect(str_to_lower(sale_terms), 'valid arm')) %>%
+  left_join(foreclosures, by=c('PARCELNO'='prop_parcelnum', 'year')) %>%
+```
 
 ## Part B: Overassessment Classification
 
