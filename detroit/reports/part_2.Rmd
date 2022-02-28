@@ -44,12 +44,12 @@ foreclosures <- dplyr::tbl(con, 'foreclosures') %>%
 
 joined = 
   sales %>%
-  mutate(year = year(ymd(sale_date))) %>%
-  left_join(assessments, by=c('parcel_num'='PARCELNO', 'year')) %>%
+  mutate(year = year(ymd(sale_date)),
+         sale_year = as.factor(year)) %>%
+  left_join(assessments, by=c('parcel_num'='PARCELNO', c('year'='year')), suffix = c("", "_assessed")) %>%
   left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel")) %>%
   mutate(property_c = as.character(property_c),
-         propclass = as.character(propclass),
-         year = as.character(year)) %>% 
+         propclass = as.character(propclass)) %>% 
   filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) %>%
   filter(propclass == 401)
 
@@ -59,17 +59,15 @@ joined_mini =
          sale_price >= 2000,
          ASSESSEDVALUE >= 1000,
          str_detect(str_to_lower(sale_terms), 'valid arm')) %>%
-  left_join(foreclosures, by=c('parcel_num'='prop_parcelnum', 'year'))
+  left_join(foreclosures, by=c('parcel_num'='prop_parcelnum', c('sale_year'='year')))
 
 ratios =
   cmfproperty::reformat_data(
-    joined %>%
-      mutate(sale_year = year(ymd(sale_date))),
+    joined_mini,
     sale_col = "sale_price",
     assessment_col = "ASSESSEDVALUE",
-    sale_year_col = "sale_year",
-  ) %>%
-  arrange(desc(parcel_num), year)
+    sale_year_col = "year",
+  )
 
 stats = calc_iaao_stats(ratios)
 ```
@@ -78,87 +76,21 @@ stats = calc_iaao_stats(ratios)
 
 ## Part A: Introduction
 
-```{r}
-joined %>%
-  filter(sale_price < 1000) %>%
-  ggplot(aes(x = sale_price)) +
-  geom_histogram()
-```
+Under the current foreclosure crisis in Detroit that has been going on since 2011 it is pertinent that properties be assessed properly so as to not deepen the crisis but still maintain equity and revenue streams. Since previous studies of assessments have been determined to be inequitable 
 
 ```{r}
-joined %>%
-  filter(sale_price < 1000) %>%
-  ggplot(aes(x = ASSESSEDVALUE)) +
-  geom_histogram()
-```
-
-```{r}
-joined %>%
-  group_by(sale_terms) %>%
-  count() %>% 
-  arrange(desc(n))
-```
-
-```{r}
-joined %>%  
-  collect() %>%
-  filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
-  filter(sale_price < 1000) %>%
-  ggplot(aes(x = ASSESSEDVALUE)) +
-  geom_histogram()
-```
-
-But according to the definition of the various sales terms, only "arm's length" sales are supposedly representative of the market. So we will examine only those. For the sake of simplicity let's restrict the data to the valuations to the lower half first initial inspection.
-
-```{r}
-joined %>%
-  collect() %>%
-  filter(str_detect(sale_terms, regex("VALID ARMS LENGTH", ignore_case = TRUE))) %>%
-  filter(ASSESSEDVALUE > 4000 & ASSESSEDVALUE < 20000) %>%
-  pivot_longer(cols = c('sale_price','ASSESSEDVALUE'), names_to = "type", values_to = "value") %>%
-  ggplot(aes(x=value, fill=type)) +
-  geom_histogram(alpha=0.5, position = 'identity', binwidth = 1000) +
-  xlim(0, 100000)
-```
-
-Here we note a sharp difference in the shapes of the distribution of the assessment values versus actual sale values. Also, strangely, there appears to be a sharp cutoff around $\$20,000$ in the assessed values samples.
-
-As the University of Chicago analysts note, the typical way to examine fairness of assessments is through the ratios of the assessed values divided by the sales price.
-
-```{r}
-stats
+stats %>%
+  ggplot() +
+  geom_point(aes(x = Year, y = median_ratio, size = N)) +
+  scale_size(range = c(.1, 10), name="Sample Size") +
+  labs(title = "Median Sales Ratio 2011-2020",
+       y = "Median Ratio")
 ```
 
 
-```{r}
-min_reporting_yr = 2012
-max_reporting_yr = 2020
-jurisdiction_name = "Detroit"
-```
 
 ```{r}
-d_plots = diagnostic_plots(stats, ratios, min_reporting_yr, max_reporting_yr)
-```
 
-```{r}
-gridExtra::grid.arrange(d_plots[[2]],
-                        d_plots[[3]],
-                        d_plots[[4]],
-                        d_plots[[5]],
-                        ncol = 2,
-                        nrow = 2)
-```
-
-Looking at the various trends in sales ratios over time we see that, no matter how expensive the property is, the sales ratio and the assessed value decreases over time, while the actual sales price increases, especially from 2016 onwards.
-
-```{r include=FALSE}
-remove(foreclosures)
-remove(foreclosures_chars)
-remove(parcels_subset)
-remove(glm_model)
-remove(foreclosure_recipe)
-remove(foreclosure_workflow)
-remove(model_fit)
 ```
 
 
@@ -231,5 +163,11 @@ summary(cmat)
 autoplot(roc_curve(over_pred, ratios_test$overassessed, ".pred_Not overassessed", na_rm = T)) +
   labs(title = 'ROC Curve for Identification of Overassessments',
        subtitle = 'Using Naive Bayes')
+```
+
+## Part C: 2019 Assessments
+
+```{r}
+
 ```
 
