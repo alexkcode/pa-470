@@ -1,0 +1,34 @@
+---
+title: "Part 3"
+author: "Alexis Kwan"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: paged
+    theme: sandstone
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE)
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(lubridate)
+library(parsnip)
+library(discrim)
+library(cmfproperty)
+```
+
+
+```{r setup, include=FALSE}
+con <- DBI::dbConnect(RSQLite::SQLite(), "database/detroit.sqlite")
+
+assessments <- dplyr::tbl(con, 'assessments') %>% collect()
+sales <- dplyr::tbl(con, 'sales') %>% collect()
+parcels <- dplyr::tbl(con, 'parcels') %>% collect()
+```
+
+```{r}
+plot(cars)
+```
+
