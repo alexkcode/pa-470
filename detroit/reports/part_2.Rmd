@@ -8,21 +8,23 @@ output:
     theme: sandstone
 ---
 
-```{r include=FALSE}
+```{r include=FALSE, eval=F}
 # for use in part 2
 # devtools::install_github("tidymodels/discrim")
 install.packages("discrim")
 install.packages("parsnip")
 install.packages("naivebayes")
+install.packages("DT")
 ```
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
+library(parsnip)
 library(tidyverse)
 library(tidymodels)
 library(kableExtra)
 library(lubridate)
-library(parsnip)
 library(discrim)
 library(cmfproperty)
 library(lubridate)
@@ -76,23 +78,46 @@ stats = calc_iaao_stats(ratios)
 
 ## Part A: Introduction
 
-Under the current foreclosure crisis in Detroit that has been going on since 2011 it is pertinent that properties be assessed properly so as to not deepen the crisis but still maintain equity and revenue streams. Since previous studies of assessments have been determined to be inequitable 
+Under the current foreclosure crisis in Detroit that has been going on since 2011 it is pertinent that properties be assessed properly so as to not deepen the crisis but still maintain equity and revenue streams. Since previous studies of assessments have been determined to be inequitable but the the assessment quality, based on the sales ratio, has improved over time as shown in the figure below where the zero line represents 50% of the market value.
 
 ```{r}
 stats %>%
+  mutate(ratio_diff = median_ratio-0.5,
+         over_under = ifelse(ratio_diff > 0, "Under assessed", "Over assessed")) %>%
   ggplot() +
-  geom_point(aes(x = Year, y = median_ratio, size = N)) +
-  scale_size(range = c(.1, 10), name="Sample Size") +
+  geom_segment(aes(x=Year, xend=Year, y=0, yend=ratio_diff, color=over_under), size=10, alpha=0.9) +
+  theme_light() +
+  ylim(-0.5, 0.5) +
+  scale_x_continuous(breaks = pretty_breaks()) +
   labs(title = "Median Sales Ratio 2011-2020",
-       y = "Median Ratio")
+       y = "Sales Ratio Difference",
+       color = "")
 ```
-
-
 
 ```{r}
+library(ggridges)
 
+joined_mini %>%
+  ggplot(aes(y=sale_year, x=sale_price, fill=sale_year)) +
+  geom_boxplot() +
+  theme(legend.position="none") +
+  labs(title = "Sales 2011-2020",
+       x = "Sale Price",
+       y = "Year") +
+  scale_x_log10(labels = dollar)
+  # scale_x_continuous(breaks = pretty_breaks())
 ```
 
+```{r}
+joined_mini %>%
+  filter(!is.na(foreclosed)) %>%
+  group_by(sale_year) %>%
+  count(foreclosed) %>%
+  ggplot(aes(y=sale_year, x=n)) +
+  geom_col() +
+    xlab("Foreclosures") +
+    ylab("Year")
+```
 
 ## Part B: Overassessment Classification
 
@@ -112,7 +137,7 @@ over_workflow =
 ratios_2016 =
   ratios %>%
   mutate(overassessed = as.factor(if_else(RATIO > 0.5, 'Overassesed', 'Not overassessed'))) %>%
-  filter(year == 2016)
+  filter(sale_year == "2016")
 
 over_recipe =
   recipe(overassessed ~ zip_code + property_class_desc + use_code + 
@@ -120,19 +145,6 @@ over_recipe =
          data=ratios_2016) %>%
   step_unknown(all_nominal_predictors()) %>%
   step_dummy(all_nominal_predictors())
-
-# over_recipe =
-#   recipe(ratios) %>%
-#   step_mutate(overassessed = as.factor(if_else(RATIO > 0.5, 1, 0))) %>%
-#   step_filter(year == 2016) %>%
-#   add_role(overassessed, new_role = 'outcome') %>%
-#   update_role(zip_code, property_class_desc, use_code, total_square_footage, 
-#               year_built, is_improved, new_role = 'predictor') %>%
-#   step_unknown(all_nominal_predictors()) %>%
-#   step_dummy(all_nominal_predictors()) %>%
-#   prep()
-
-# over_recipe %>% summary()
 
 over_workflow =
   over_workflow %>%
@@ -155,7 +167,13 @@ cmat
 ```
 
 ```{r}
-summary(cmat)
+# cs = 
+summary(cmat) %>%
+  tibble() %>%
+  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
+
+# cs %>%
+#   datatable()
 ```
 
 ```{r}
@@ -168,6 +186,46 @@ autoplot(roc_curve(over_pred, ratios_test$overassessed, ".pred_Not overassessed"
 ## Part C: 2019 Assessments
 
 ```{r}
+joined_mini_pre2019 =
+  joined_mini %>%
+  filter(year < 2019)
 
+joined_mini_2019 =
+  joined_mini %>%
+  filter(year == 2019)
+
+assess_model <-
+  decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode('regression')
+
+assess_recipe <- recipe(sale_price ~
+                         ecf + total_square_footage + year + use_code 
+                        + is_improved + zoning + zip_code, 
+                       data = joined_mini_pre2019) %>%
+  step_filter(!is.na(sale_price)) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+assess_workflow <-
+  workflow() %>%
+  add_model(assess_model) %>%
+  add_recipe(assess_recipe)
+
+a_split = initial_split(joined_mini_pre2019)
+
+a_train = training(a_split)
+a_test = testing(a_split)
+
+model_fit <- assess_workflow %>%
+  fit(data=a_train)
+
+multi_metric = metric_set(rmse, mape)
+
+tree_metrics = augment(model_fit, new_data = a_test) %>% 
+  multi_metric(truth = sale_price, estimate = .pred)
+
+tree_metrics %>%
+  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
 ```
 
