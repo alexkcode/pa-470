@@ -19,7 +19,6 @@ library(discrim)
 library(cmfproperty)
 ```
 
-
 ```{r setup, include=FALSE}
 con <- DBI::dbConnect(RSQLite::SQLite(), "database/detroit.sqlite")
 
@@ -29,6 +28,44 @@ parcels <- dplyr::tbl(con, 'parcels') %>% collect()
 ```
 
 ```{r}
-plot(cars)
+#
+# Preprocessing
+#
+
+foreclosures <- dplyr::tbl(con, 'foreclosures') %>%
+  collect() %>%
+  select(-prop_addr) %>%
+  pivot_longer(!prop_parcelnum, names_to='year', values_to='foreclosed') %>%
+  filter(!is.na(foreclosed)) %>%
+  distinct()
+
+joined = 
+  sales %>%
+  mutate(year = year(ymd(sale_date)),
+         sale_year = as.factor(year)) %>%
+  left_join(assessments, by=c('parcel_num'='PARCELNO', c('year'='year')), suffix = c("", "_assessed")) %>%
+  left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel")) %>%
+  mutate(property_c = as.character(property_c),
+         propclass = as.character(propclass)) %>% 
+  filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) %>%
+  filter(propclass == 401)
+
+joined_mini = 
+  joined %>%
+  filter(property_c == 401,
+         sale_price >= 2000,
+         ASSESSEDVALUE >= 1000,
+         str_detect(str_to_lower(sale_terms), 'valid arm')) %>%
+  left_join(foreclosures, by=c('parcel_num'='prop_parcelnum', c('sale_year'='year')))
+
+ratios =
+  cmfproperty::reformat_data(
+    joined_mini,
+    sale_col = "sale_price",
+    assessment_col = "ASSESSEDVALUE",
+    sale_year_col = "year",
+  )
+
+stats = calc_iaao_stats(ratios)
 ```
 
