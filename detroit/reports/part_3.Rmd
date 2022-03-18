@@ -20,14 +20,14 @@ library(cmfproperty)
 ```
 
 ```{r setup, include=FALSE}
-con <- DBI::dbConnect(RSQLite::SQLite(), "database/detroit.sqlite")
+con <- DBI::dbConnect(RSQLite::SQLite(), "../database/detroit.sqlite")
 
 assessments <- dplyr::tbl(con, 'assessments') %>% collect()
 sales <- dplyr::tbl(con, 'sales') %>% collect()
 parcels <- dplyr::tbl(con, 'parcels') %>% collect()
 ```
 
-```{r}
+```{r preprocessing}
 #
 # Preprocessing
 #
@@ -67,5 +67,14 @@ ratios =
   )
 
 stats = calc_iaao_stats(ratios)
+```
+
+```{r}
+joined_mini =
+  joined_mini %>%
+  group_by(ward) %>%
+  mutate(foreclosure_ward_ratio = sum(foreclosed, na.rm = T)/sum(joined_mini$foreclosed, na.rm = T))
+
+joined_mini
 ```
 
