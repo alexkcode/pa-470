@@ -6,10 +6,14 @@ output:
     code_folding: hide
     df_print: paged
     theme: sandstone
+    toc: true
+    toc_float: true
+    number_sections: true
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(warning = FALSE)
+```{r include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = FALSE)
+
 library(tidyverse)
 library(lubridate)
 library(tidymodels)
@@ -17,17 +21,27 @@ library(lubridate)
 library(parsnip)
 library(discrim)
 library(cmfproperty)
+library(fpc)
+library(tidycensus)
+library(tigris)
+library(sf)
+library(scales)
+library(leaflet)
+library(corrr)
+
 ```
 
-```{r setup, include=FALSE}
+
+```{r include=FALSE}
 con <- DBI::dbConnect(RSQLite::SQLite(), "../database/detroit.sqlite")
 
 assessments <- dplyr::tbl(con, 'assessments') %>% collect()
 sales <- dplyr::tbl(con, 'sales') %>% collect()
 parcels <- dplyr::tbl(con, 'parcels') %>% collect()
+attributes <- dplyr::tbl(con, 'attributes') %>% collect()
 ```
 
-```{r preprocessing}
+```{r include=FALSE}
 #
 # Preprocessing
 #
@@ -39,16 +53,33 @@ foreclosures <- dplyr::tbl(con, 'foreclosures') %>%
   filter(!is.na(foreclosed)) %>%
   distinct()
 
-joined = 
+joined =
   sales %>%
   mutate(year = year(ymd(sale_date)),
          sale_year = as.factor(year)) %>%
-  left_join(assessments, by=c('parcel_num'='PARCELNO', c('year'='year')), suffix = c("", "_assessed")) %>%
+  full_join(assessments, by=c('parcel_num'='PARCELNO', c('year'='year')), suffix = c("", "_assessed")) %>%
   left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel")) %>%
+  left_join(attributes, by = c('parcel_num'='parcel_num'), suffix = c('','_attrs')) %>%
   mutate(property_c = as.character(property_c),
-         propclass = as.character(propclass)) %>% 
+         propclass = as.character(propclass)) %>%
   filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) %>%
   filter(propclass == 401)
+
+# joined = 
+#   assessments %>%
+#   full_join(
+#     sales %>%
+#       mutate(year = year(ymd(sale_date)),
+#              sale_year = as.factor(year)),
+#     by = c('PARCELNO' = 'parcel_num', c('year' = 'year')),
+#     suffix = c("", "_assessed")
+#   ) %>% 
+#   left_join(parcels, by = c('PARCELNO'='parcel_number'), suffix = c("", "_parcel")) %>%
+#   left_join(attributes, by = c('PARCELNO'='parcel_num'), suffix = c('','_attrs')) %>%
+#   mutate(property_c = as.character(property_c),
+#          propclass = as.character(propclass)) %>% 
+#   filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) %>%
+#   filter(propclass == 401)
 
 joined_mini = 
   joined %>%
@@ -69,12 +100,280 @@ ratios =
 stats = calc_iaao_stats(ratios)
 ```
 
-```{r}
-joined_mini =
-  joined_mini %>%
-  group_by(ward) %>%
-  mutate(foreclosure_ward_ratio = sum(foreclosed, na.rm = T)/sum(joined_mini$foreclosed, na.rm = T))
+# Part A: Exploratory Analysis
 
-joined_mini
+```{r}
+stats %>%
+  mutate(ratio_diff = median_ratio-0.5,
+         over_under = ifelse(ratio_diff > 0, "Under assessed", "Over assessed")) %>%
+  ggplot() +
+  geom_segment(aes(x=Year, xend=Year, y=0, yend=ratio_diff, color=over_under), size=10, alpha=0.9) +
+  theme_light() +
+  ylim(-0.5, 0.5) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(title = "Median Sales Ratio 2011-2020",
+       y = "Sales Ratio Difference",
+       color = "")
 ```
 
+Under the current foreclosure crisis in Detroit that has been going on since 2011 it is pertinent that properties be assessed properly so as to not deepen the crisis but still maintain equity and revenue streams. Since previous studies of assessments have been determined to be inequitable but the the assessment quality, based on the sales ratio, has improved over time as shown in the figure below where the zero line represents 50% of the market value.
+
+```{r}
+library(ggridges)
+
+joined_mini %>%
+  ggplot(aes(y=sale_year, x=sale_price, fill=sale_year)) +
+  geom_boxplot() +
+  theme(legend.position="none") +
+  labs(title = "Sales 2011-2020",
+       x = "Sale Price",
+       y = "Year") +
+  scale_x_log10(labels = dollar)
+  # scale_x_continuous(breaks = pretty_breaks())
+```
+
+```{r}
+joined_mini %>%
+  filter(!is.na(foreclosed)) %>%
+  group_by(sale_year) %>%
+  count(foreclosed) %>%
+  ggplot(aes(y=sale_year, x=n)) +
+  geom_col() +
+    xlab("Foreclosures") +
+    ylab("Year")
+```
+
+# Modeling Property Value and Assessment
+
+## Part B: Overassessment of 2016 Properties
+
+First, we want to find a way to identify if a home is likely to be overassessed in a given year. We will analyze homes and assessments from 2016. Use 2016 sales and assessments with the parcels property characteristics (note that we only know if a home was overassessed if it sold). Create a classification metric of overassessment based on properties which sold and use this as your dependent variable.
+
+```{r}
+# adding new features
+joined_mini =
+  joined_mini %>%
+  group_by(zip_code) %>%
+  mutate(foreclosure_ratio = sum(foreclosed, na.rm = T)/sum(joined_mini$foreclosed, na.rm = T),
+         sqft_price = mean(sale_price/total_square_footage, na.rm = T))
+```
+
+```{r}
+class_model = 
+  rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger") %>%
+  set_args(mtry = NULL,
+           trees = 1000,
+           min_n = 10)
+
+parcels_subset =
+  parcels %>%
+  select(
+    parcel_number,
+    zip_code,
+    total_square_footage,
+    total_acreage,
+    frontage,
+    depth,
+    total_floor_area,
+    year_built,
+    X,
+    Y
+  ) %>% 
+  filter(!is.na(X)) %>% 
+  distinct()
+
+ratios_2016 =
+  ratios %>%
+  left_join(parcels_subset, by=c('parcel_num'='parcel_number'), suffix=c('_','')) %>%
+  tibble() %>%
+  mutate(overassessed = as.factor(if_else(RATIO > 0.5, 'Overassesed', 'Not overassessed'))) %>%
+  filter(sale_year == "2016")
+
+over_recipe =
+  recipe(overassessed ~ zip_code + ASSESSED_VALUE + use_code + 
+           total_square_footage + year_built + is_improved + X + Y, 
+         data=ratios_2016) %>%
+  step_log(ASSESSED_VALUE) %>%
+  step_interact(~c(ASSESSED_VALUE, total_square_footage, X, Y)) %>%
+  step_impute_linear(total_square_footage, year_built, X, Y) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_impute_knn(all_predictors(), neighbors = 3) %>%
+  step_dummy(all_nominal_predictors())
+
+over_workflow = 
+  workflow() %>%
+  add_model(class_model) %>%
+  add_recipe(over_recipe)
+
+ratios_split = initial_split(ratios_2016)
+
+ratios_train = training(ratios_split)
+ratios_test = testing(ratios_split)
+
+class_fit = over_workflow %>%
+  fit(data=ratios_train)
+
+cmat = augment(class_fit, new_data = ratios_test) %>% 
+  conf_mat(truth = overassessed, estimate = .pred_class)
+
+over_pred = predict(class_fit, ratios_test, type = "prob")
+
+autoplot(cmat, type = "heatmap")
+```
+
+Based on the metrics we see above for classification we see that misclassification of overassessment is quite likely. We see that approximately 38% of properties were incorrectly classified.
+
+```{r}
+summary(cmat) %>%
+  tibble() %>%
+  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE)))
+```
+
+```{r}
+autoplot(roc_curve(over_pred, ratios_test$overassessed, ".pred_Not overassessed", na_rm = T)) +
+  labs(title = 'ROC Curve for Identification of Overassessments',
+       subtitle = 'Using Random Forest')
+```
+
+The ROC curve above specifies how well our classification model would do if we adjusted the threshold for determining whether something is overassessed or not. There is a fairly even trade off between getting true positives and false positives as we increase the treshold.
+
+```{r include=FALSE}
+over_pred_all = predict(class_fit, ratios_2016, type = "prob")
+ratios_2016_aug = 
+  ratios_2016 %>% 
+  bind_cols(over_pred_all) 
+
+# ratios_2016_aug$census_code = apply(ratios_2016, 1, function(row) call_geolocator_latlon(row['Y'], row['X']))
+
+census_tracts =
+  get_acs(
+    geography = "tract",
+    variables = c(
+      medincome = "B19013_001",
+      totalpop = "B02001_001",
+      white_alone = "B02001_002"
+    ),
+    state = "MI",
+    county = "Wayne",
+    year = 2016,
+    output = 'wide'
+  ) %>%
+  mutate(pct_white = white_aloneE / totalpopE)
+
+mi_tracts <- tigris::tracts(state='26', year=2016, cb=TRUE)
+
+ratios_2016_crs =
+  st_as_sf(
+    ratios_2016_aug %>%
+      filter(!is.na(X)),
+    coords = c("X", "Y"),
+    crs = st_crs(mi_tracts)
+  )
+           
+ratios_tracts = st_join(ratios_2016_crs, mi_tracts)
+
+tracts_joined =
+  mi_tracts %>%
+  left_join(census_tracts %>% select(GEOID, totalpopE, medincomeE)) %>% 
+  filter(COUNTYFP == '163') %>%
+  st_join(ratios_tracts, suffix = c("", "_ratios"))
+```
+
+```{r}
+label_str <- str_glue("<strong>Tract %s</strong><br>Prob. of Overassessment: %s<br/>")
+labels <- sprintf(label_str,
+                tracts_joined$NAME,
+                percent(tracts_joined$.pred_Overassesed, accuracy = .1)) %>% 
+  lapply(htmltools::HTML)
+
+pal1 =
+  colorNumeric(
+    palette = "Blues",
+    domain = tracts_joined$.pred_Overassesed,
+    na.color = "Grey"
+  )
+
+ # %>% select(GEOID, geometry, .pred_Overassesed),
+m = 
+  leaflet() %>%
+  addTiles() %>% addPolygons(
+    data = tracts_joined,
+    fillColor = ~ pal1(.pred_Overassesed),
+    weight = 0.5,
+    opacity = 0.5,
+    color = "white",
+    dashArray = 3,
+    fillOpacity = 0.7,
+    highlight = highlightOptions(
+      weight = 5,
+      color = "#666",
+      dashArray = "",
+      fillOpacity = 0.7,
+      bringToFront = TRUE
+    ),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list("font-weight" = "normal", padding = "3px 8px"),
+      textsize = "15px",
+      direction = "auto"
+    )
+  ) %>%
+  addLegend(
+    pal = pal1,
+    values = tracts_joined$.pred_Overassesed,
+    opacity = 0.7,
+    title = NULL,
+    position = "bottomright"
+  )
+  
+m
+```
+
+Looking at geography of our predictions, we do not yet see a real pattern. Until we supplement the map with other information it is hard to make any reasonable conclusions.
+
+## Part C: 2019 Assessments of Property Value
+
+```{r}
+joined_mini_pre2019 =
+  joined_mini %>%
+  filter(year < 2019)
+
+joined_mini_2019 =
+  joined_mini %>%
+  filter(year == 2019)
+
+assess_model <-
+  decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode('regression')
+
+assess_recipe <- recipe(sale_price ~
+                         ecf + total_square_footage + year + is_improved + zoning, 
+                       data = joined_mini_pre2019) %>%
+  step_filter(!is.na(sale_price)) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+assess_workflow <-
+  workflow() %>%
+  add_model(assess_model) %>%
+  add_recipe(assess_recipe)
+
+a_split = initial_split(joined_mini_pre2019)
+
+a_train = training(a_split)
+a_test = testing(a_split)
+
+model_fit <- assess_workflow %>%
+  fit(data=a_train)
+
+multi_metric = metric_set(rmse, mape)
+
+tree_metrics = augment(model_fit, new_data = a_test) %>% 
+  multi_metric(truth = sale_price, estimate = .pred)
+
+tree_metrics %>%
+  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
+```
