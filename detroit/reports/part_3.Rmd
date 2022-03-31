@@ -377,3 +377,4 @@ tree_metrics = augment(model_fit, new_data = a_test) %>%
 tree_metrics %>%
   rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
 ```
+
