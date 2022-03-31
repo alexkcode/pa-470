@@ -1,0 +1,700 @@
+---
+title: "Part 3"
+author: "Alexis Kwan"
+output: 
+  html_document:
+    code_folding: hide
+    df_print: paged
+    theme: sandstone
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, echo = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(lubridate)
+library(parsnip)
+# library(discrim)
+library(cmfproperty)
+library(fpc)
+library(tidycensus)
+library(tigris)
+library(sf)
+library(scales)
+library(leaflet)
+library(corrr)
+
+```
+
+
+```{r include=FALSE}
+con <- DBI::dbConnect(RSQLite::SQLite(), "../database/detroit.sqlite")
+
+assessments <- dplyr::tbl(con, 'assessments') %>% collect()
+sales <- dplyr::tbl(con, 'sales') %>% collect()
+parcels <- dplyr::tbl(con, 'parcels') %>% collect()
+attributes <- dplyr::tbl(con, 'attributes') %>% collect()
+```
+
+
+```{r include=FALSE}
+#
+# Preprocessing
+#
+
+foreclosures <- dplyr::tbl(con, 'foreclosures') %>%
+  collect() %>%
+  select(-prop_addr) %>%
+  pivot_longer(!prop_parcelnum, names_to='year', values_to='foreclosed') %>%
+  filter(!is.na(foreclosed)) %>%
+  distinct()
+
+joined =
+  sales %>%
+  mutate(year = year(ymd(sale_date)),
+         sale_year = as.factor(year)) %>%
+  full_join(assessments, by=c('parcel_num'='PARCELNO', c('year'='year')), suffix = c("", "_assessed")) %>%
+  left_join(parcels, by = c('parcel_num'='parcel_number'), suffix = c("", "_parcel")) %>%
+  left_join(attributes, by = c('parcel_num'='parcel_num'), suffix = c('','_attrs')) %>%
+  filter(propclass == 401) %>%
+  mutate(property_c = as.character(property_c),
+         propclass = as.character(propclass)) %>%
+  filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) 
+
+# joined = 
+#   assessments %>%
+#   full_join(
+#     sales %>%
+#       mutate(year = year(ymd(sale_date)),
+#              sale_year = as.factor(year)),
+#     by = c('PARCELNO' = 'parcel_num', c('year' = 'year')),
+#     suffix = c("", "_assessed")
+#   ) %>% 
+#   left_join(parcels, by = c('PARCELNO'='parcel_number'), suffix = c("", "_parcel")) %>%
+#   left_join(attributes, by = c('PARCELNO'='parcel_num'), suffix = c('','_attrs')) %>%
+#   mutate(property_c = as.character(property_c),
+#          propclass = as.character(propclass)) %>% 
+#   filter(str_detect(sale_terms, regex("valid arm", ignore_case = TRUE))) %>%
+#   filter(propclass == 401)
+
+joined_mini = 
+  joined %>%
+  filter(sale_price >= 2000,
+         ASSESSEDVALUE >= 1000,
+         str_detect(str_to_lower(sale_terms), 'valid arm')) %>%
+  left_join(foreclosures, by=c('parcel_num'='prop_parcelnum', c('sale_year'='year')))
+
+ratios =
+  cmfproperty::reformat_data(
+    joined_mini,
+    sale_col = "sale_price",
+    assessment_col = "ASSESSEDVALUE",
+    sale_year_col = "year",
+  )
+
+stats = calc_iaao_stats(ratios)
+```
+
+# Exploratory Analysis
+
+## Sales Ratios
+
+The sales ratio is one of the standard ways of analyzing the accuracy of property assessments, where the sales ratio is defined as the assessed value of a property divided by the sale price. 
+
+```{r}
+iaao = cmfproperty::iaao_graphs(stats=stats, ratios=ratios, min_reporting_yr = 2011, max_reporting_yr = 2020, jurisdiction_name = 'Detroit')
+```
+
+```{r}
+iaao[[2]]
+```
+
+By Michigan state law the limit for sales ratios in Detroit is 50% of market value, which means that if a property is assessed over 50% it is over assessed, and if under 50%, under assessed.
+
+```{r}
+stats %>%
+  mutate(ratio_diff = median_ratio-0.5,
+         over_under = ifelse(ratio_diff > 0, "Under assessed", "Over assessed")) %>%
+  ggplot() +
+  geom_segment(aes(x=Year, xend=Year, y=0, yend=ratio_diff, color=over_under), size=10, alpha=0.9) +
+  theme_light() +
+  ylim(-0.5, 0.5) +
+  scale_x_continuous(breaks = pretty_breaks()) +
+  labs(title = "Median Sales Ratio 2011-2020",
+       y = "Sales Ratio Difference",
+       color = "")
+```
+
+## Sales and Foreclosures
+
+Under the current foreclosure crisis in Detroit that has been going on since 2011 it is pertinent that properties be assessed properly so as to not deepen the crisis but still maintain equity and revenue streams. Since previous studies of assessments have been determined to be inequitable but the the assessment quality, based on the sales ratio, has improved over time as shown in the figure below where the zero line represents 50% of the market value.
+
+```{r}
+library(ggridges)
+
+joined_mini %>%
+  ggplot(aes(y=sale_year, x=sale_price, fill=sale_year)) +
+  geom_boxplot() +
+  theme(legend.position="none") +
+  labs(title = "Sales 2011-2020",
+       x = "Sale Price",
+       y = "Year") +
+  scale_x_log10(labels = dollar)
+  # scale_x_continuous(breaks = pretty_breaks())
+```
+
+```{r}
+joined_mini %>%
+  filter(!is.na(foreclosed)) %>%
+  group_by(sale_year) %>%
+  count(foreclosed) %>%
+  ggplot(aes(y=sale_year, x=n)) +
+  geom_col() +
+    xlab("Foreclosures") +
+    ylab("Year")
+```
+
+# Modeling Property Value and Assessment
+
+## Overassessment of 2016 Properties
+
+First, we want to find a way to identify if a home is likely to be overassessed in a given year. We will analyze homes and assessments from 2016. Use 2016 sales and assessments with the parcels property characteristics (note that we only know if a home was overassessed if it sold). Create a classification metric of overassessment based on properties which sold and use this as your dependent variable.
+
+```{r}
+# data for use in modeling
+
+detroit <- tigris::county_subdivisions(state=26, county=163, cb=TRUE) %>% filter(NAME == "Detroit")
+
+# MI wayne county tracts
+# mi_tracts = tigris::tracts(state='26', year=2016, cb=TRUE)
+
+wayne_tracts <- tigris::tracts(state=26, county = 163, cb = TRUE, year=2010) %>%
+  mutate(GEOID = str_remove_all(GEO_ID, '1400000US')) %>%
+  select(GEOID)
+
+detroit_targ <- st_intersection(wayne_tracts, detroit %>% select(geometry))
+
+detroit_tracts <- wayne_tracts %>% filter(GEOID %in% detroit_targ$GEOID)
+
+targ_geo <- tbl(con, 'attributes') %>% 
+  filter(property_c == 401) %>%
+  select(parcel_num, Longitude, Latitude) %>%
+  collect() %>%
+  filter(!is.na(Latitude)) %>%
+  st_as_sf(coords=c("Longitude", "Latitude"))
+
+st_crs(targ_geo) <- st_crs(detroit_tracts)
+
+parcel_geo <- targ_geo %>% st_join(detroit_tracts, join=st_intersects) %>%
+  as.data.frame() %>%
+  select(-geometry)
+
+targ_sales_16 <- 
+  tbl(con, 'sales') %>% filter(year(sale_date) == 2016,
+                                 sale_price > 2000,
+                                 property_c == 401) %>%
+      select(-c(grantor, grantee, ecf, property_c)) %>%
+      arrange(desc(sale_price)) %>% 
+      collect() %>%
+      filter(str_detect(str_to_lower(sale_terms), 'valid arm')) %>%
+      distinct(parcel_num, .keep_all=TRUE)
+
+model_data <- tbl(con, 'assessments') %>% 
+  filter(year == 2016 | year == 2019, 
+         propclass == 401,
+         ASSESSEDVALUE > 2000) %>%
+  collect() %>%
+  left_join(
+    targ_sales_16,
+    by=c('PARCELNO'='parcel_num')
+  ) %>%
+  left_join(
+    tbl(con, 'attributes') %>% select(
+      parcel_num,
+      Neighborhood,
+      total_squa,
+      heightcat,
+      extcat,
+      has_garage,
+      has_basement,
+      bathcat,
+      total_squa,
+      total_floo,
+      year_built,
+      Longitude,
+      Latitude
+    ) %>% 
+      collect(),
+    by=c('PARCELNO'='parcel_num')
+  ) %>%
+  left_join(
+    parcels,
+    by = c('PARCELNO' = 'parcel_number'),
+    suffix = c("", "_parcel")
+  ) %>% 
+  left_join(
+    parcel_geo,
+    by=c('PARCELNO'='parcel_num')
+  )
+
+# adding new features
+# joined_mini =
+#   joined_mini %>%
+#   group_by(zip_code) %>%
+#   mutate(foreclosure_ratio = sum(foreclosed, na.rm = T)/sum(joined_mini$foreclosed, na.rm = T),
+#          sqft_price = mean(sale_price/total_square_footage, na.rm = T))
+
+model_ratios =
+  model_data %>% 
+  mutate(RATIO = ASSESSEDVALUE / sale_price) %>%
+  # left_join(parcels_subset, by=c('PARCELNO'='parcel_number'), suffix=c('','_')) %>%
+  tibble() %>%
+  mutate(overassessed = as.factor(if_else(RATIO > 0.5, 'Overassesed', 'Not overassessed'))) 
+```
+
+```{r}
+valid_model_ratios = 
+  model_ratios %>% 
+  filter(!is.na(RATIO), year == 2016) %>%
+  drop_na(c(zip_code, ASSESSEDVALUE, total_squa, 
+            year_built, is_improved, X, Y))
+
+class_model = 
+  rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger") %>%
+  set_args(mtry = NULL,
+           trees = 1000,
+           min_n = 10)
+
+over_recipe =
+  recipe(overassessed ~ zip_code + ASSESSEDVALUE +  
+           total_squa + year_built + is_improved + X + Y, 
+         data=valid_model_ratios) %>%
+  step_log(ASSESSEDVALUE) %>%
+  step_interact(~c(ASSESSEDVALUE, total_squa, X, Y)) %>%
+  step_impute_linear(total_squa, year_built, X, Y) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_impute_knn(all_predictors(), neighbors = 3) %>%
+  # step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+  # step_naomit(all_predictors())
+
+over_workflow = 
+  workflow() %>%
+  add_model(class_model) %>%
+  add_recipe(over_recipe)
+
+ratios_split = initial_split(valid_model_ratios)
+
+ratios_train = training(ratios_split)
+ratios_test = testing(ratios_split)
+
+class_fit = over_workflow %>%
+  fit(data=ratios_train)
+
+cmat = augment(class_fit, new_data = ratios_test) %>% 
+  conf_mat(truth = overassessed, estimate = .pred_class)
+
+over_pred = predict(class_fit, ratios_test, type = "prob")
+
+autoplot(cmat, type = "heatmap")
+```
+
+Based on the metrics we see above for classification we see that misclassification of overassessment is quite likely. We see that approximately 38% of properties were incorrectly classified.
+
+```{r}
+summary(cmat) %>%
+  tibble() %>%
+  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE)))
+```
+
+```{r}
+autoplot(roc_curve(over_pred, ratios_test$overassessed, ".pred_Not overassessed", na_rm = T)) +
+  labs(title = 'ROC Curve for Identification of Overassessments',
+       subtitle = 'Using Random Forest')
+```
+
+The ROC curve above specifies how well our classification model would do if we adjusted the threshold for determining whether something is overassessed or not. There is a fairly even trade off between getting true positives and false positives as we increase the treshold. We will use Bayesian optimization next to attempt to improve the model.
+
+```{r}
+valid_model_ratios_dense = 
+  valid_model_ratios %>%
+  drop_na(c(zip_code, ASSESSEDVALUE, total_squa, 
+            year_built, is_improved, X, Y))
+
+ratios_split = initial_split(valid_model_ratios_dense)
+
+ratios_train = training(ratios_split)
+ratios_test = testing(ratios_split)
+
+a_rf_spec <- 
+   rand_forest(min_n = tune(), trees = tune()) %>% 
+   set_engine("ranger") %>% 
+   set_mode("classification")
+
+over_workflow = 
+  workflow() %>%
+  add_model(a_rf_spec) %>%
+  add_recipe(over_recipe)
+
+initial_vals <- over_workflow %>%
+  tune_grid(
+    resamples = vfold_cv(data = ratios_train, v = 3, repeats = 1),
+    grid = 5,
+    metrics = metric_set(roc_auc, f_meas),
+  )
+
+ctrl <- control_bayes(verbose = TRUE)
+
+your_search <- 
+  over_workflow %>%
+  tune_bayes(
+    resamples = vfold_cv(data = ratios_train, v = 3, repeats = 1),
+    metrics = metric_set(roc_auc, f_meas),
+    # note you may simply pass a number here e.g. 6 for a random search
+    initial = initial_vals, 
+    iter = 5,
+    control = ctrl
+  )
+```
+
+```{r}
+your_search %>%
+  select_best(metric = "roc_auc")
+```
+
+The best parameters for random forest modeling are shown above.
+
+```{r}
+best_args = 
+  your_search %>%
+  select_best(metric = "roc_auc")
+
+class_model = 
+  rand_forest() %>%
+  set_mode("classification") %>%
+  set_engine("ranger") %>%
+  set_args(trees = best_args$trees,
+           min_n = best_args$min_n)
+
+over_recipe =
+  recipe(overassessed ~ zip_code + ASSESSEDVALUE +  
+           total_squa + year_built + is_improved + X + Y, 
+         data=valid_model_ratios_dense) %>%
+  step_log(ASSESSEDVALUE) %>%
+  step_interact(~c(ASSESSEDVALUE, total_squa, X, Y)) %>%
+  step_impute_linear(total_squa, year_built, X, Y) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_naomit(all_predictors()) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_impute_knn(all_predictors(), neighbors = 3) %>%
+  # step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+  # step_naomit(all_predictors())
+
+over_workflow = 
+  workflow() %>%
+  add_model(class_model) %>%
+  add_recipe(over_recipe)
+
+ratios_split = initial_split(valid_model_ratios_dense)
+
+ratios_train = training(ratios_split)
+ratios_test = testing(ratios_split)
+
+class_fit = over_workflow %>%
+  fit(data=ratios_train)
+
+cmat = augment(class_fit, new_data = ratios_test) %>% 
+  conf_mat(truth = overassessed, estimate = .pred_class)
+
+over_pred = predict(class_fit, ratios_test, type = "prob")
+
+autoplot(cmat, type = "heatmap")
+```
+
+However we see that even with the tuning the model did not perform much better.
+
+```{r include=FALSE}
+# data set for all assessments, including the ones without sales
+
+# class_fit = over_workflow %>% fit(data=valid_model_ratios_dense)
+# 
+# over_pred_all = predict(class_fit, model_ratios, type = "prob")
+# 
+# model_ratios_aug = 
+#   model_ratios %>% 
+#   bind_cols(over_pred_all)
+```
+
+
+```{r include=FALSE}
+# data for geospatially visualizing overassessments for all counties
+
+# census_tracts =
+#   get_acs(
+#     geography = "tract",
+#     variables = c(
+#       medincome = "B19013_001",
+#       totalpop = "B02001_001",
+#       white_alone = "B02001_002"
+#     ),
+#     state = "MI",
+#     county = "Wayne",
+#     year = 2016,
+#     output = 'wide'
+#   ) %>%
+#   mutate(pct_white = white_aloneE / totalpopE)
+# 
+# model_ratios_geo =
+#   st_as_sf(
+#     model_ratios_aug %>%
+#       filter(!is.na(X)),
+#     coords = c("X", "Y"),
+#     # crs = st_crs(mi_tracts)
+#     crs = st_crs(wayne_tracts)
+#   )
+#            
+# ratios_tracts = st_join(model_ratios_geo, wayne_tracts)
+# 
+# parcel_geo <- targ_geo %>% st_join(detroit_tracts, join=st_intersects) %>%
+#   as.data.frame() %>%
+#   select(-geometry)
+
+# tracts_joined =
+#   mi_tracts %>%
+#   left_join(census_tracts %>% select(GEOID, totalpopE, medincomeE)) %>% 
+#   filter(COUNTYFP == '163') %>%
+#   st_join(ratios_tracts, suffix = c("", "_ratios"))
+
+# geo_data <- detroit_tracts %>%
+#   left_join(model_ratios_geo)
+```
+
+```{r}
+# label_str <- str_glue("<strong>Tract %s</strong><br>Prob. of Overassessment: %s<br/>")
+# labels <- sprintf(label_str,
+#                 model_ratios_geo$GEOID,
+#                 percent(model_ratios_geo$.pred_Overassesed, accuracy = .1)) %>% 
+#   lapply(htmltools::HTML)
+# 
+# pal1 =
+#   colorNumeric(
+#     palette = "Blues",
+#     domain = model_ratios_geo$.pred_Overassesed,
+#     na.color = "Grey"
+#   )
+
+ # %>% select(GEOID, geometry, .pred_Overassesed),
+# m = 
+#   leaflet() %>%
+#   addTiles() %>% addPolygons(
+#     data = model_ratios_geo,
+#     fillColor = ~ pal1(.pred_Overassesed),
+#     weight = 0.5,
+#     opacity = 0.5,
+#     color = "white",
+#     dashArray = 3,
+#     fillOpacity = 0.7,
+#     highlight = highlightOptions(
+#       weight = 5,
+#       color = "#666",
+#       dashArray = "",
+#       fillOpacity = 0.7,
+#       bringToFront = TRUE
+#     ),
+#     label = labels,
+#     labelOptions = labelOptions(
+#       style = list("font-weight" = "normal", padding = "3px 8px"),
+#       textsize = "15px",
+#       direction = "auto"
+#     )
+#   ) %>%
+#   addLegend(
+#     pal = pal1,
+#     values = model_ratios_geo$.pred_Overassesed,
+#     opacity = 0.7,
+#     title = NULL,
+#     position = "bottomright"
+#   )
+#   
+# m
+```
+
+Looking at geography of our predictions, we do not yet see a real pattern. Until we supplement the map with other information it is hard to make any reasonable conclusions.
+
+## 2019 Assessments of Property Value
+
+```{r}
+# creating modeling data
+
+ratios_pre2019 =
+  ratios %>%
+  filter(SALE_YEAR < 2019)
+
+ratios_2019 =
+  model_ratios %>%
+  filter(year == 2019) %>%
+  select(-c(RATIO, sale_date, year))
+
+a_ratios = 
+  ratios_pre2019 %>%
+  left_join(ratios_2019, by=c('parcel_num'='PARCELNO'), suffix=c('','_dup')) %>%
+  select(-contains('_dup')) %>%
+  mutate(is_improved = as.factor(is_improved),
+         year_built = as.factor(year_built)) %>%
+  mutate_if(is.character, as.factor)
+
+a_split = initial_split(a_ratios)
+
+a_train = training(a_split)
+a_test = testing(a_split)
+```
+
+
+```{r}
+# creating model recipes
+
+assess_recipe <- recipe(sale_price ~
+                          ecf + total_square_footage +
+                          year_built + zoning,
+                        data = a_train) %>% 
+  step_filter(!is.na(sale_price)) %>%
+  # step_impute_linear(all_numeric_predictors()) %>%
+  # step_impute_median(all_numeric_predictors) %>%
+  # step_unknown(all_nominal_predictors()) %>%
+  step_impute_knn(all_predictors(), neighbors = 3) %>%
+  step_naomit(ecf, total_square_footage, year_built, zoning) %>%
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+linear_reg_spec <- 
+   linear_reg(penalty = tune(), mixture = tune()) %>% 
+   set_engine("glmnet")
+   
+rf_spec <- 
+   rand_forest(mtry = tune(), min_n = tune(), trees = 250) %>% 
+   set_engine("ranger") %>% 
+   set_mode("regression")
+   
+nn_spec <- 
+   nearest_neighbor(neighbors = tune(), weight_func = tune()) %>% 
+   set_engine("kknn") %>% 
+   set_mode("regression")
+   
+my_set <- workflow_set(
+  preproc = list(base = assess_recipe),
+  models = list(linear_reg = linear_reg_spec, random_forest = rf_spec, nearest_neighbor = nn_spec)
+)
+```
+
+
+```{r}
+# fitting and evaluating models
+
+grid_ctrl <-
+   control_grid(
+      save_pred = FALSE,
+      save_workflow = FALSE
+   )
+
+grid_results <-
+   my_set %>%
+   workflow_map(
+      seed = 1503,
+      resamples = vfold_cv(a_train, v = 3, repeats = 1),
+      grid = 5,
+      control = grid_ctrl,
+      verbose = TRUE
+   )
+```
+
+```{r}
+for(i in 1:nrow(grid_results)) {
+  wkf_id = as.character(grid_results[i, 1])
+  
+  best_results <-
+    grid_results %>%
+    extract_workflow_set_result(wkf_id) %>%
+    select_best(metric = "rmse")
+  
+  print(best_results)
+  
+  best_results_fit <-
+    grid_results %>%
+    extract_workflow(wkf_id) %>%
+    finalize_workflow(best_results) %>%
+    last_fit(split = a_split) #this is the output of rsample::initial_time_split() or rsample::initial_split()
+  
+  title = str_replace_all(wkf_id,'base_','')
+  title = str_replace_all(title, '_', ' ')
+  
+  best_results_plot <-
+    best_results_fit %>%
+    collect_predictions() %>%
+    ggplot(aes(x = sale_price, y = .pred)) +
+    geom_abline(color = "gray50", lty = 2) +
+    geom_point(alpha = 0.5) +
+    scale_x_continuous(labels = comma) +
+    scale_y_continuous(labels = comma) +
+    coord_obs_pred() +
+    labs(
+      title = str_to_title(title),
+      x = "observed", 
+      y = "predicted"
+    )
+  
+  show(best_results_plot)
+}
+```
+
+
+```{r}
+# fitting and applying the best model
+
+# model_fit_reg <- assess_workflow %>%
+#   fit(data=a_train)
+# 
+# multi_metric = metric_set(rmse, mape)
+# 
+# tree_metrics = augment(model_fit_reg, new_data = a_test) %>% 
+#   multi_metric(truth = sale_price, estimate = .pred)
+# 
+# tree_metrics %>%
+#   rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
+```
+
+```{r}
+# our_preds2 = model_fit_reg %>% augment(
+#   model_data %>% 
+#     filter(year == 2019) %>% 
+#     mutate(sale_date = ymd('2019-01-01')) %>%
+#     rename(parcel_num = PARCELNO)
+# )
+# 
+# our_preds2 %>% 
+#          select(parcel_num, ASSESSEDVALUE, .pred) %>% 
+#          mutate(.pred = 0.5 * 10^.pred) %>% 
+#          pivot_longer(!parcel_num) %>%
+# ggplot(aes(x=value, color=name, fill=name)) +
+#   geom_density(alpha=.3) +
+#   scale_x_log10(labels=dollar) +
+#   labs(x = 'Assessed Value', y='Density', 
+#        fill = 'Type', color='Type', title='Density of Predictions and AV')
+
+```
+
+# Conclusion
+
+We see that no matter if the task was overassessment classification or new assessments, random forest models seemed to perform the best. However, no matter the model, they seem to all produce a lot of false negatives and false positives in the case of overassessments and show a fairly large variance in predicting actual assessment values. 
+
+A combination of variables representing geographic location, neighborhood, square footage and zoing were used to predict valuations. A combination of variables representing similar abstractions, along with property improvements were used for the overassessments. I tried to use variables that mirrored physical aspects of the properties as much as possible, as well as social aspects.
+
+I would implment these models in actual use cases unless more data were accrued or use in combination with a lot of manual assessment, especially of the properties with falsely predicted values. This includes both overassessment and valuation. 

@@ -8,23 +8,21 @@ output:
     theme: sandstone
 ---
 
-```{r include=FALSE, eval=F}
+```{r include=FALSE}
 # for use in part 2
 # devtools::install_github("tidymodels/discrim")
 install.packages("discrim")
 install.packages("parsnip")
 install.packages("naivebayes")
-install.packages("DT")
 ```
-
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, warning = FALSE)
-library(parsnip)
 library(tidyverse)
 library(tidymodels)
 library(kableExtra)
 library(lubridate)
+library(parsnip)
 library(discrim)
 library(cmfproperty)
 library(lubridate)
@@ -94,9 +92,9 @@ stats %>%
        color = "")
 ```
 
-```{r}
-library(ggridges)
 
+
+```{r}
 joined_mini %>%
   ggplot(aes(y=sale_year, x=sale_price, fill=sale_year)) +
   geom_boxplot() +
@@ -108,15 +106,10 @@ joined_mini %>%
   # scale_x_continuous(breaks = pretty_breaks())
 ```
 
+
+
 ```{r}
-joined_mini %>%
-  filter(!is.na(foreclosed)) %>%
-  group_by(sale_year) %>%
-  count(foreclosed) %>%
-  ggplot(aes(y=sale_year, x=n)) +
-  geom_col() +
-    xlab("Foreclosures") +
-    ylab("Year")
+
 ```
 
 ## Part B: Overassessment Classification
@@ -146,6 +139,19 @@ over_recipe =
   step_unknown(all_nominal_predictors()) %>%
   step_dummy(all_nominal_predictors())
 
+# over_recipe =
+#   recipe(ratios) %>%
+#   step_mutate(overassessed = as.factor(if_else(RATIO > 0.5, 1, 0))) %>%
+#   step_filter(year == 2016) %>%
+#   add_role(overassessed, new_role = 'outcome') %>%
+#   update_role(zip_code, property_class_desc, use_code, total_square_footage, 
+#               year_built, is_improved, new_role = 'predictor') %>%
+#   step_unknown(all_nominal_predictors()) %>%
+#   step_dummy(all_nominal_predictors()) %>%
+#   prep()
+
+# over_recipe %>% summary()
+
 over_workflow =
   over_workflow %>%
   add_recipe(over_recipe)
@@ -167,13 +173,7 @@ cmat
 ```
 
 ```{r}
-# cs = 
-summary(cmat) %>%
-  tibble() %>%
-  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
-
-# cs %>%
-#   datatable()
+summary(cmat)
 ```
 
 ```{r}
@@ -186,46 +186,6 @@ autoplot(roc_curve(over_pred, ratios_test$overassessed, ".pred_Not overassessed"
 ## Part C: 2019 Assessments
 
 ```{r}
-joined_mini_pre2019 =
-  joined_mini %>%
-  filter(year < 2019)
 
-joined_mini_2019 =
-  joined_mini %>%
-  filter(year == 2019)
-
-assess_model <-
-  decision_tree() %>%
-  set_engine("rpart") %>%
-  set_mode('regression')
-
-assess_recipe <- recipe(sale_price ~
-                         ecf + total_square_footage + year + use_code 
-                        + is_improved + zoning + zip_code, 
-                       data = joined_mini_pre2019) %>%
-  step_filter(!is.na(sale_price)) %>%
-  step_unknown(all_nominal_predictors()) %>%
-  step_dummy(all_nominal_predictors())
-
-assess_workflow <-
-  workflow() %>%
-  add_model(assess_model) %>%
-  add_recipe(assess_recipe)
-
-a_split = initial_split(joined_mini_pre2019)
-
-a_train = training(a_split)
-a_test = testing(a_split)
-
-model_fit <- assess_workflow %>%
-  fit(data=a_train)
-
-multi_metric = metric_set(rmse, mape)
-
-tree_metrics = augment(model_fit, new_data = a_test) %>% 
-  multi_metric(truth = sale_price, estimate = .pred)
-
-tree_metrics %>%
-  rename_all(~ toupper(gsub(".", "", .x, fixed = TRUE))) 
 ```
 
