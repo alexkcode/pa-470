@@ -1,0 +1,29 @@
+---
+title: "Economic Zones"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(sf)
+library(tigris)
+library(tidycensus)
+```
+
+```{r}
+cook_tracts <- tigris::tracts(state=17, county = 31, cb = TRUE, year=2010)
+cook_tracts
+```
+
+
+```{r}
+chicago_acs = get_acs(geography = "tract", 
+              variables = c(medincome = "B19013_001"),
+              state=17, county=31,
+              output='wide')
+chicago_acs
+```
+
