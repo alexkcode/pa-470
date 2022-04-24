@@ -1,0 +1,93 @@
+---
+title: "Economic Zones"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(tidymodels)
+library(sf)
+library(tigris)
+library(tidycensus)
+```
+
+```{r}
+chicago_tracts = read_csv("chicago_tracts.csv") %>%
+  mutate(GEOID = as.character(GEOID))
+```
+
+
+```{r}
+vars = load_variables(2019, "acs5", cache = TRUE)
+```
+
+
+```{r}
+cook_tracts = tigris::tracts(state=17, county = 31, cb = TRUE, year=2020)
+cook_tracts
+```
+
+S2503 - FINANCIAL CHARACTERISTICS 
+S2506 - FINANCIAL CHARACTERISTICS FOR HOUSING UNITS WITH A MORTGAGE
+S2507 - FINANCIAL CHARACTERISTICS FOR HOUSING UNITS WITHOUT A MORTGAGE 
+
+```{r}
+cook_fin_acs = get_acs(
+  geography = "tract",
+  table = "S2503",
+  year = 2020,
+  state = 17,
+  county = 31,
+  output = 'wide',
+  geometry = T,
+  cache_table = T
+)
+```
+
+
+```{r}
+cook_acs = get_acs(
+  geography = "tract",
+  year = 2020,
+  variables = c(med_income = "B19013_001",
+                commute_tot = "B08128_001"),
+  state = 17,
+  county = 31,
+  # place = "Chicago city",
+  output = 'wide',
+  geometry = T
+)
+cook_acs
+```
+
+```{r}
+chicago_acs = 
+  chicago_tracts %>% 
+  left_join(
+    cook_acs, 
+    by = c("GEOID"="GEOID"), 
+    suffix = c("","_acs")
+  ) %>%
+  left_join(
+    cook_fin_acs,
+    by = c("GEOID"="GEOID"), 
+    suffix = c("","_fin_acs")
+  )
+chicago_acs
+```
+
+
+```{r}
+place_transit = read_csv('MyDailyTravelData/place_transit.csv')
+place = read_csv('MyDailyTravelData/place.csv')
+travel_household = read_csv('MyDailyTravelData/household.csv')
+travel_location = read_csv('MyDailyTravelData/location.csv')
+```
+
+```{r}
+cca_ref = read_csv('CDS_archive_201811/Reference_CCAProfiles_2012_2016.csv')
+muni_profiles = read_csv('CDS_archive_201811/Reference_muniProfiles_2012_2016.csv')
+```
+
