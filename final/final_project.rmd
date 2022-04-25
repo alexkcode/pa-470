@@ -11,6 +11,7 @@ library(tidymodels)
 library(sf)
 library(tigris)
 library(tidycensus)
+library(janitor)
 ```
 
 ```{r}
@@ -18,9 +19,54 @@ chicago_tracts = read_csv("chicago_tracts.csv") %>%
   mutate(GEOID = as.character(GEOID))
 ```
 
+```{r}
+chicago_tracts_transit =
+  read_csv("chicago_tracts_2020_transit_needs_2015_2017_walkability_2020_tif_2021.csv") %>%
+  mutate(
+    GEOID = as.character(GEOID),
+    tract = NAME,
+    tif = ref,
+    walk_score = TotalScore,
+    trans_avail = Mean_trans
+  )
+```
 
 ```{r}
-vars = load_variables(2019, "acs5", cache = TRUE)
+tif_exp = read_csv("TIF_Expenditures_2017_2020.csv") %>%
+  clean_names() %>%
+  rowwise() %>%
+  mutate(total_tif_expend = sum(c_across(8:22))) %>%
+  group_by(tif_number) %>%
+  summarise(total_tif_expend_2017_2020 = sum(total_tif_expend)) %>%
+  ungroup()
+```
+
+```{r}
+chicago_tracts_transit_tif =
+ chicago_tracts_transit %>% 
+  left_join(
+    tif_exp,
+    by = c("tif"="tif_number"),
+    suffix = c("","_tif")
+  ) %>%
+  group_by(GEOID,
+           tract,
+           Emp_Transi,
+           HH_Density) %>%
+  summarise(
+    HH_per_acr_med = median(HH_per_acr, na.rm = T),
+    emp_mile_med = median(Emp_within, na.rm = T),
+    trans_avail_med = median(trans_avail, na.rm = T),
+    walk_score_med = median(walk_score, na.rm = T),
+    tif_expend_med = median(total_tif_expend_2017_2020, na.rm = T)
+  ) %>%
+  ungroup()
+```
+
+
+```{r}
+vars = load_variables(2020, "acs5", cache = TRUE)
+subject_vars = load_variables(2020, "acs5/subject", cache = TRUE)
 ```
 
 
@@ -34,16 +80,53 @@ S2506 - FINANCIAL CHARACTERISTICS FOR HOUSING UNITS WITH A MORTGAGE
 S2507 - FINANCIAL CHARACTERISTICS FOR HOUSING UNITS WITHOUT A MORTGAGE 
 
 ```{r}
-cook_fin_acs = get_acs(
-  geography = "tract",
-  table = "S2503",
-  year = 2020,
-  state = 17,
-  county = 31,
-  output = 'wide',
-  geometry = T,
-  cache_table = T
-)
+# cook_fin_acs = 
+#   get_acs(
+#     geography = "tract",
+#     # table = "S2503",
+#     year = 2020,
+#     variables = c(
+#       cost_per_0_income = "S2503_C01_045",
+#       cost_per_no_cash_income = "S2503_C01_046",
+#       cost_per_20k_income = "S2503_C01_025",
+#       cost_per_35k_income = "S2503_C01_029",
+#       cost_per_50k_income = "S2503_C01_033",
+#       cost_per_75k_income = "S2503_C01_037",
+#       cost_per_75k_plus_income = "S2503_C01_041",
+#       household_income = "B25120_001",
+#       mean_commute_minutes = "S0802_C04_090"
+#     ),
+#     state = 17,
+#     county = 31,
+#     output = 'wide',
+#     geometry = T,
+#     cache_table = T
+#   ) %>%
+#   mutate(
+#     income_per_cost_0 = 100/cost_per_0_incomeE,
+#     income_per_cost_no_cash = 100/cost_per_no_cash_incomeE,
+#     income_per_cost_20k = 100/cost_per_20k_incomeE,
+#     income_per_cost_35k = 100/cost_per_35k_incomeE,
+#     income_per_cost_50k = 100/cost_per_50k_incomeE,
+#     income_per_cost_75k = 100/cost_per_75k_incomeE,
+#     income_per_cost_75k_plus = 100/cost_per_75k_plus_incomeE
+#   )
+
+cook_fin_acs = 
+  get_acs(
+    geography = "tract",
+    # table = "S2503",
+    year = 2020,
+    variables = c(
+      household_income = "B25120_001",
+      mean_commute_minutes = "S0802_C04_090"
+    ),
+    state = 17,
+    county = 31,
+    output = 'wide',
+    geometry = T,
+    cache_table = T
+  )
 ```
 
 
@@ -51,43 +134,75 @@ cook_fin_acs = get_acs(
 cook_acs = get_acs(
   geography = "tract",
   year = 2020,
-  variables = c(med_income = "B19013_001",
-                commute_tot = "B08128_001"),
+  variables = c(
+    transit_means_tot = "B08119_001",
+    transit_public = "B08119_028",
+    transit_walked = "B08119_037",
+    prop_value_med = "B25097_001"
+  ), 
   state = 17,
   county = 31,
   # place = "Chicago city",
   output = 'wide',
-  geometry = T
+  geometry = T,
+  cache_table = T
 )
 cook_acs
 ```
 
+
 ```{r}
-chicago_acs = 
-  chicago_tracts %>% 
-  left_join(
-    cook_acs, 
-    by = c("GEOID"="GEOID"), 
-    suffix = c("","_acs")
-  ) %>%
-  left_join(
-    cook_fin_acs,
-    by = c("GEOID"="GEOID"), 
-    suffix = c("","_fin_acs")
-  )
-chicago_acs
+chicago_transit_acs_tif =
+  chicago_tracts_transit_tif %>%
+  left_join(cook_acs,
+            by = c("GEOID" = "GEOID"),
+            suffix = c("", "_acs")) %>%
+  left_join(cook_fin_acs,
+            by = c("GEOID" = "GEOID"),
+            suffix = c("", "_fin_acs")) %>%
+  select(c("GEOID":"tif_expend_med"),
+        c("transit_means_totE":"prop_value_medM"),
+        c("household_incomeE":"mean_commute_minutesM"),
+        "geometry")
+chicago_transit_acs_tif
+```
+
+```{r}
+econ_zone_recipe = 
+  recipe(~., data = chicago_transit_acs_tif %>% select(1, 5:21)) %>% 
+  step_impute_knn(all_predictors(), neighbors = 3) %>%
+  # step_naomit(ecf, total_square_footage, year_built, zoning) %>%
+  # step_unknown(all_nominal_predictors()) %>%
+  # step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric()) %>%
+  prep()
+econ_zone_baked = econ_zone_recipe %>% bake(new_data = NULL)
+econ_zone_baked
 ```
 
 
 ```{r}
-place_transit = read_csv('MyDailyTravelData/place_transit.csv')
-place = read_csv('MyDailyTravelData/place.csv')
-travel_household = read_csv('MyDailyTravelData/household.csv')
-travel_location = read_csv('MyDailyTravelData/location.csv')
+library(dbscan)
+
+econ_zone_matrix = econ_zone_baked %>% select(2:18)
+
+db = dbscan(econ_zone_matrix, eps = 1, minPts = 100)
+db
 ```
 
 ```{r}
-cca_ref = read_csv('CDS_archive_201811/Reference_CCAProfiles_2012_2016.csv')
-muni_profiles = read_csv('CDS_archive_201811/Reference_muniProfiles_2012_2016.csv')
+db$cluster
 ```
+
+
+```{r}
+pairs(econ_zone_matrix, col = db$cluster + 1L)
+```
+
+```{r}
+library(cluster)
+
+pam(econ_zone_matrix, k = 184)
+```
+
 
