@@ -172,35 +172,8 @@ econ_zone_recipe =
   step_normalize(all_numeric(), na_rm = T) %>%
   prep()
 econ_zone_baked = econ_zone_recipe %>% bake(new_data = NULL)
-econ_zone_matrix = econ_zone_baked %>% select(2:18)
+econ_zone_matrix = econ_zone_baked %>% select(c("lat":"mean_commute_minutesM"))
 head(econ_zone_baked)
-```
-
-## DBSCAN
-
-```{r}
-dbs =
-  tibble(k = 1:9) %>%
-  mutate(
-    kclust = map(k, ~kmeans(points, .x)),
-    tidied = map(kclust, tidy),
-    glanced = map(kclust, glance),
-    augmented = map(kclust, augment, points)
-  )
-
-db = dbscan(econ_zone_matrix, eps = 1, minPts = 10)
-db
-```
-
-```{r}
-chicago_transit_acs_tif %>%
-  mutate(db_cluster = db$cluster)
-```
-
-```{r}
-chicago_transit_acs_tif %>%
-  mutate(db_cluster = db$cluster) %>%
-  group_by()
 ```
 
 ## K-Means Clustering
@@ -277,6 +250,40 @@ econ_kkmeans = kkmeans(
 fviz_cluster(list(data = points, cluster = econ_kkmeans@.Data),
              geom = "point",
              main = "kkmeans") 
+```
+
+## DBSCAN
+
+```{r}
+dbs =
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~kmeans(points, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, points)
+  )
+
+db = dbscan(econ_zone_matrix, eps = 1, minPts = 10)
+
+fviz_cluster(
+  db,
+  data = econ_zone_matrix[, 1:2],
+  geom = "point",
+  ellipse = FALSE,
+  main = "dbscan eps=1, minPts=10"
+)
+```
+
+```{r}
+chicago_transit_acs_tif %>%
+  mutate(db_cluster = db$cluster)
+```
+
+```{r}
+chicago_transit_acs_tif %>%
+  mutate(db_cluster = db$cluster) %>%
+  group_by()
 ```
 
 ## GIS Processing
