@@ -12,6 +12,10 @@ library(sf)
 library(tigris)
 library(tidycensus)
 library(janitor)
+library(factoextra)
+library(cluster)
+library(kernlab)
+library(dbscan)
 ```
 
 ```{r}
@@ -29,9 +33,7 @@ chicago_tracts_transit =
     walk_score = TotalScore,
     trans_avail = Mean_trans
   )
-```
 
-```{r}
 tif_exp = read_csv("TIF_Expenditures_2017_2020.csv") %>%
   clean_names() %>%
   rowwise() %>%
@@ -39,9 +41,7 @@ tif_exp = read_csv("TIF_Expenditures_2017_2020.csv") %>%
   group_by(tif_number) %>%
   summarise(total_tif_expend_2017_2020 = sum(total_tif_expend)) %>%
   ungroup()
-```
 
-```{r}
 chicago_tracts_transit_tif =
  chicago_tracts_transit %>% 
   left_join(
@@ -49,10 +49,14 @@ chicago_tracts_transit_tif =
     by = c("tif"="tif_number"),
     suffix = c("","_tif")
   ) %>%
+  mutate(lat = INTPTLAT,
+         lon = INTPTLON) %>%
   group_by(GEOID,
            tract,
            Emp_Transi,
-           HH_Density) %>%
+           HH_Density,
+           lat,
+           lon) %>%
   summarise(
     HH_per_acr_med = median(HH_per_acr, na.rm = T),
     emp_mile_med = median(Emp_within, na.rm = T),
@@ -67,12 +71,6 @@ chicago_tracts_transit_tif =
 ```{r}
 vars = load_variables(2020, "acs5", cache = TRUE)
 subject_vars = load_variables(2020, "acs5/subject", cache = TRUE)
-```
-
-
-```{r}
-cook_tracts = tigris::tracts(state=17, county = 31, cb = TRUE, year=2020)
-cook_tracts
 ```
 
 S2503 - FINANCIAL CHARACTERISTICS 
@@ -127,10 +125,7 @@ cook_fin_acs =
     geometry = T,
     cache_table = T
   )
-```
 
-
-```{r}
 cook_acs = get_acs(
   geography = "tract",
   year = 2020,
@@ -147,7 +142,6 @@ cook_acs = get_acs(
   geometry = T,
   cache_table = T
 )
-cook_acs
 ```
 
 
@@ -163,46 +157,189 @@ chicago_transit_acs_tif =
   select(c("GEOID":"tif_expend_med"),
         c("transit_means_totE":"prop_value_medM"),
         c("household_incomeE":"mean_commute_minutesM"),
-        "geometry")
-chicago_transit_acs_tif
+        "geometry",
+        "lat",
+        "lon")
 ```
 
 ```{r}
 econ_zone_recipe = 
-  recipe(~., data = chicago_transit_acs_tif %>% select(1, 5:21)) %>% 
-  step_impute_knn(all_predictors(), neighbors = 3) %>%
+  recipe(~., data = chicago_transit_acs_tif %>% select(1, 5:23)) %>% 
+  step_impute_knn(all_numeric(), neighbors = 3) %>%
   # step_naomit(ecf, total_square_footage, year_built, zoning) %>%
   # step_unknown(all_nominal_predictors()) %>%
   # step_dummy(all_nominal_predictors()) %>%
-  step_normalize(all_numeric()) %>%
+  step_normalize(all_numeric(), na_rm = T) %>%
   prep()
 econ_zone_baked = econ_zone_recipe %>% bake(new_data = NULL)
-econ_zone_baked
+econ_zone_matrix = econ_zone_baked %>% select(2:18)
+head(econ_zone_baked)
 ```
 
+## DBSCAN
 
 ```{r}
-library(dbscan)
+dbs =
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~kmeans(points, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, points)
+  )
 
-econ_zone_matrix = econ_zone_baked %>% select(2:18)
-
-db = dbscan(econ_zone_matrix, eps = 1, minPts = 100)
+db = dbscan(econ_zone_matrix, eps = 1, minPts = 10)
 db
 ```
 
 ```{r}
-db$cluster
+chicago_transit_acs_tif %>%
+  mutate(db_cluster = db$cluster)
+```
+
+```{r}
+chicago_transit_acs_tif %>%
+  mutate(db_cluster = db$cluster) %>%
+  group_by()
+```
+
+## K-Means Clustering
+
+```{r}
+points = econ_zone_matrix
+
+kclusts =
+  tibble(k = 1:9) %>%
+  mutate(
+    kclust = map(k, ~kmeans(points, .x)),
+    tidied = map(kclust, tidy),
+    glanced = map(kclust, glance),
+    augmented = map(kclust, augment, points)
+  )
+
+clusters =
+  kclusts %>%
+  unnest(cols = c(tidied))
+
+assignments =
+  kclusts %>% 
+  unnest(cols = c(augmented))
+
+clusterings =
+  kclusts %>%
+  unnest(cols = c(glanced))
+
+# ggplot(clusterings, aes(k, tot.withinss)) +
+#   geom_line() +
+#   geom_point()
+```
+
+```{r}
+fviz_nbclust(econ_zone_matrix, FUN = kmeans, method = "wss")
 ```
 
 
 ```{r}
-pairs(econ_zone_matrix, col = db$cluster + 1L)
+fviz_nbclust(econ_zone_matrix, FUN = kmeans, method = "silhouette")
 ```
 
 ```{r}
-library(cluster)
+econ_means = kmeans(points, centers = 2)
 
-pam(econ_zone_matrix, k = 184)
+fviz_cluster(econ_means, 
+             data = points,
+             geom="point")
 ```
 
+
+```{r}
+fviz_cluster(econ_means, 
+             data = points %>% select(household_incomeE, trans_avail_med),
+             geom="point")
+```
+
+```{r}
+fviz_cluster(econ_means, 
+             data = points %>% select(household_incomeE, tif_expend_med),
+             geom="point")
+```
+
+## Kernal K-Means Clustering
+
+```{r}
+econ_kkmeans = kkmeans(
+  as.matrix(points),
+  centers = 2,
+  kernel = 'rbfdot',
+  kpar = list(sigma = 0.005)
+)
+
+fviz_cluster(list(data = points, cluster = econ_kkmeans@.Data),
+             geom = "point",
+             main = "kkmeans") 
+```
+
+## GIS Processing
+
+```{r}
+chicago_transit_acs_tif_aug =
+  chicago_transit_acs_tif %>%
+  mutate(means_2 = kmeans(points, centers = 2)$cluster,
+         means_3 = kmeans(points, centers = 3)$cluster)
+```
+
+```{r}
+chicago_transit_acs_tif_aug %>%
+  group_by(means_2) %>%
+  summarise(hh_income = median(household_incomeE, na.rm = T),
+            prop_value = median(prop_value_medE, na.rm = T),
+            transit_avail = median(trans_avail_med, na.rm = T),
+            walkability = median(walk_score_med, na.rm = T))
+```
+
+```{r}
+chicago_transit_acs_tif_aug %>%
+  group_by(means_3) %>%
+  summarise(hh_income = median(household_incomeE, na.rm = T),
+            prop_value = median(prop_value_medE, na.rm = T),
+            transit_avail = median(trans_avail_med, na.rm = T),
+            walkability = median(walk_score_med, na.rm = T))
+```
+
+```{r}
+chicago_transit_acs_tif_aug =
+  chicago_transit_acs_tif_aug %>%
+  mutate(
+    km_label_1 = case_when(means_2 == 1 ~ "High Development",
+                           means_2 == 2 ~ "Low Development"),
+    km_label_2 = case_when(
+      means_3 == 1 ~ "Low Development",
+      means_3 == 2 ~ "Medium Development",
+      means_3 == 3 ~ "High Development"
+    )
+  )
+write_csv(chicago_transit_acs_tif_aug, file = "chicago_transit_acs_tif_aug.csv")
+```
+
+
+```{r}
+st_write(chicago_transit_acs_tif_aug, "chicago_transit_acs_tif_aug.geojson")
+```
+
+```{r}
+tif_projects = read_csv("Tax_Increment_Financing__TIF__Annual_Report_-_Projects.csv")
+tif_projects_agg = 
+  tif_projects %>%
+  clean_names() %>%
+  filter(ongoing == T) %>%
+  group_by(tif_number) %>%
+  summarise(total_payments = sum(current_year_payments))
+write_csv(tif_projects_agg, file = "tif_projects_agg.csv")
+```
+
+```{r}
+cluster_spend = read_csv("EconomicClustering_TIF_Projects.csv")
+cluster_spend %>%
+  group_by(means_3)
+```
 
