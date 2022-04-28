@@ -4,7 +4,7 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
 library(tidyverse)
 library(lubridate)
 library(tidymodels)
@@ -16,6 +16,8 @@ library(factoextra)
 library(cluster)
 library(kernlab)
 library(dbscan)
+library(ggExtra)
+library(corrgram)
 ```
 
 ```{r}
@@ -82,9 +84,7 @@ vars = load_variables(2020, "acs5", cache = TRUE)
 subject_vars = load_variables(2020, "acs5/subject", cache = TRUE)
 ```
 
-S2503 - FINANCIAL CHARACTERISTICS 
-S2506 - FINANCIAL CHARACTERISTICS FOR HOUSING UNITS WITH A MORTGAGE
-S2507 - FINANCIAL CHARACTERISTICS FOR HOUSING UNITS WITHOUT A MORTGAGE 
+## Data Variable and Variable Characteristics
 
 ```{r}
 # cook_fin_acs = 
@@ -153,7 +153,6 @@ cook_acs = get_acs(
 )
 ```
 
-
 ```{r}
 chicago_transit_acs_tif =
   chicago_tracts_transit_tif %>%
@@ -171,6 +170,41 @@ chicago_transit_acs_tif =
         "lon")
 ```
 
+The census data used includes income data, mean commute time in minutes and property value. All census data is aggregated by tract, which was the basis of all joins used for the final processed input data. CMAP data used includes metrics on transit Accessibility, household density and employment accessibility. Finally, from the Chicago Data Portal, the boundaries for TIFs and TIF expenditures were obtained. All of this data was combined using spatial joins and joins by census tract ID wherever possible. 
+
+```{r}
+p <-
+  ggplot(
+    chicago_transit_acs_tif,
+    aes(x = transit_means_totE, y = prop_value_medE, size = emp_mile_med)
+  ) +
+  geom_point() +
+  theme(legend.position="none") +
+  labs(title = "Property Value by Time Spent on Transit to Work",
+       subtitle = "Dot size represents employment accessibility")
+
+# with marginal histogram
+p1 <- ggMarginal(p, type = "histogram") 
+
+p1
+```
+
+When we look at the transit accessibility versus propoerty value, we find a light correlation between indicating that those areas with higher property values tend to have more access to transit means, and to some degree, more employment.
+
+```{r fig.width=4, fig.height=3}
+corrgram(
+  chicago_transit_acs_tif %>% select(c(7:10),c(11, 18, 20)),
+  order = TRUE,
+  lower.panel = panel.ellipse,
+  upper.panel = panel.shade,
+  text.panel = panel.txt,
+  diag.panel = panel.minmax,
+  main = "Car Milage Data in PC2/PC1 Order"
+)
+```
+
+We see some similar correlations with property value, walkability and TIF expenditure.
+
 ```{r}
 econ_zone_recipe = 
   recipe(~., data = chicago_transit_acs_tif %>% select(1, 5:23)) %>% 
@@ -182,7 +216,6 @@ econ_zone_recipe =
   prep()
 econ_zone_baked = econ_zone_recipe %>% bake(new_data = NULL)
 econ_zone_matrix = econ_zone_baked %>% select(c("lat":"mean_commute_minutesM"))
-head(econ_zone_baked)
 ```
 
 ## K-Means Clustering
@@ -226,6 +259,34 @@ fviz_nbclust(econ_zone_matrix, FUN = kmeans, method = "silhouette")
 ```
 
 ```{r}
+chicago_transit_acs_tif_aug =
+  chicago_transit_acs_tif %>%
+  mutate(means_2 = kmeans(points, centers = 2)$cluster,
+         means_3 = kmeans(points, centers = 3)$cluster) %>%
+  mutate(
+    km_label_1 = case_when(means_2 == 1 ~ "High Development",
+                           means_2 == 2 ~ "Low Development"),
+    km_label_2 = case_when(
+      means_3 == 1 ~ "Low Development",
+      means_3 == 2 ~ "Medium Development",
+      means_3 == 3 ~ "High Development"
+    )
+  )
+
+chicago_transit_acs_tif_aug %>%
+  group_by(km_label_2) %>%
+  summarise(hh_income = median(household_incomeE, na.rm = T),
+            prop_value = median(prop_value_medE, na.rm = T),
+            transit_avail = median(trans_avail_med, na.rm = T),
+            walkability = median(walk_score_med, na.rm = T)) %>%
+  arrange(hh_income)
+```
+
+```{r}
+write_csv(chicago_transit_acs_tif_aug, file = "chicago_transit_acs_tif_aug.csv")
+```
+
+```{r}
 econ_means = kmeans(points, centers = 3)
 
 fviz_cluster(econ_means, 
@@ -236,7 +297,7 @@ fviz_cluster(econ_means,
 
 ```{r}
 fviz_cluster(econ_means, 
-             data = points %>% select(household_incomeE, trans_avail_med),
+             data = points %>% select(lat, lon),
              geom="point")
 ```
 
@@ -246,97 +307,143 @@ fviz_cluster(econ_means,
              geom="point")
 ```
 
-```{r}
-chicago_transit_acs_tif_aug =
-  chicago_transit_acs_tif %>%
-  mutate(means_2 = kmeans(points, centers = 2)$cluster,
-         means_3 = kmeans(points, centers = 3)$cluster)
-```
-
-```{r}
-chicago_transit_acs_tif_aug %>%
-  group_by(means_2) %>%
-  summarise(hh_income = median(household_incomeE, na.rm = T),
-            prop_value = median(prop_value_medE, na.rm = T),
-            transit_avail = median(trans_avail_med, na.rm = T),
-            walkability = median(walk_score_med, na.rm = T))
-```
-
-```{r}
-chicago_transit_acs_tif_aug %>%
-  group_by(means_3) %>%
-  summarise(hh_income = median(household_incomeE, na.rm = T),
-            prop_value = median(prop_value_medE, na.rm = T),
-            transit_avail = median(trans_avail_med, na.rm = T),
-            walkability = median(walk_score_med, na.rm = T))
-```
-
-```{r}
-chicago_transit_acs_tif_aug =
-  chicago_transit_acs_tif_aug %>%
-  mutate(
-    km_label_1 = case_when(means_2 == 1 ~ "High Development",
-                           means_2 == 2 ~ "Low Development"),
-    km_label_2 = case_when(
-      means_3 == 2 ~ "Low Development",
-      means_3 == 1 ~ "Medium Development",
-      means_3 == 3 ~ "High Development"
-    )
-  )
-write_csv(chicago_transit_acs_tif_aug, file = "chicago_transit_acs_tif_aug.csv")
-```
-
-
 ## Kernal K-Means Clustering
+
+```{r}
+kkclusts =
+  tibble(k = 1:9) %>%
+  mutate(
+    kkclust = map(
+      k,
+      ~ kkmeans(
+        as.matrix(points),
+        centers = .x,
+        kernel = 'rbfdot',
+        kpar = list(sigma = 0.005)
+      )
+    ),
+    centers = map(kkclust, centers),
+    withinssq = map(kkclust, withinss),
+    size = map(kkclust, size),
+    ssq = map2(withinssq, size, ~ .x/.y),
+    tssq = map(ssq, sum),
+    # augmented = map(kkclust.Data, cbind, points)
+  )
+
+clusters = 
+  kkclusts %>%
+  unnest(cols = c(centers))
+
+# assignments = 
+#   kclusts %>% 
+#   unnest(cols = c(augmented))
+
+clusterings =
+  kkclusts %>%
+  unnest(cols = c(withinssq))
+
+# kkclusts
+ggplot(clusterings, aes(k, withinssq)) +
+  geom_line() +
+  geom_point()
+```
 
 ```{r}
 econ_kkmeans = kkmeans(
   as.matrix(points),
-  centers = 2,
+  centers = 3,
   kernel = 'rbfdot',
   kpar = list(sigma = 0.005)
 )
+```
 
+```{r}
+chicago_transit_acs_tif_aug_kkm =
+  chicago_transit_acs_tif %>%
+  mutate(
+    kkmeans_3 = econ_kkmeans@.Data,
+    kkm_label = case_when(
+      kkmeans_3 == 1 ~ "Low Development",
+      kkmeans_3 == 3 ~ "Medium Development",
+      kkmeans_3 == 2 ~ "High Development"
+    )
+  ) 
+
+chicago_transit_acs_tif_aug_kkm%>% 
+  group_by(kkm_label) %>%
+  summarise(hh_income = median(household_incomeE, na.rm = T),
+            prop_value = median(prop_value_medE, na.rm = T),
+            transit_avail = median(trans_avail_med, na.rm = T),
+            walkability = median(walk_score_med, na.rm = T)) %>%
+  arrange(hh_income)
+```
+
+```{r}
 fviz_cluster(list(data = points, cluster = econ_kkmeans@.Data),
              geom = "point",
-             main = "kkmeans") 
+             main = "3-means Clustering",
+             subtitle = "Displayed using PCA") 
+```
+
+```{r}
+fviz_cluster(list(data = points %>% select(lat, lon), 
+                  cluster = econ_kkmeans@.Data),
+             geom = "point",
+             main = "3-means Clustering",
+             subtitle = "Mapped onto Lattitude/Longitude") 
 ```
 
 ## DBSCAN
 
 ```{r}
-dbs =
-  tibble(k = 1:9) %>%
-  mutate(
-    kclust = map(k, ~kmeans(points, .x)),
-    tidied = map(kclust, tidy),
-    glanced = map(kclust, glance),
-    augmented = map(kclust, augment, points)
-  )
+kNNdistplot(points, k=4)
+```
 
-db = dbscan(econ_zone_matrix, eps = 1, minPts = 10)
+```{r}
+db = dbscan(econ_zone_matrix, eps = 2.75, minPts = 4)
+```
 
+```{r}
+chicago_transit_acs_tif_aug_db =
+  chicago_transit_acs_tif %>%
+  mutate(dbmeans_3 = db$cluster,
+         db_label = case_when(
+          dbmeans_3 == 0 ~ "Excluded",
+          dbmeans_3 == 1 ~ "Low Development",
+          dbmeans_3 == 3 ~ "Medium Development",
+          dbmeans_3 == 2 ~ "High Development"
+        )) 
+    
+chicago_transit_acs_tif_aug_db %>%
+  group_by(db_label) %>%
+  summarise(hh_income = median(household_incomeE, na.rm = T),
+            prop_value = median(prop_value_medE, na.rm = T),
+            transit_avail = median(trans_avail_med, na.rm = T),
+            walkability = median(walk_score_med, na.rm = T)) %>%
+  arrange(hh_income)
+```
+
+```{r}
 fviz_cluster(
   db,
-  data = econ_zone_matrix[, 1:2],
+  data = econ_zone_matrix,
   geom = "point",
-  ellipse = FALSE,
+  ellipse = T,
   main = "dbscan eps=1, minPts=10"
 )
 ```
 
 ```{r}
-chicago_transit_acs_tif %>%
-  mutate(db_cluster = db$cluster)
+fviz_cluster(
+  db,
+  data = econ_zone_matrix %>% select(lat, lon),
+  geom = "point",
+  ellipse = T,
+  main = "dbscan eps=1, minPts=10"
+)
 ```
 
-```{r}
-chicago_transit_acs_tif %>%
-  mutate(db_cluster = db$cluster) %>%
-  group_by()
-```
-
-## GIS Processing
+## GIS Visualizations
 
 ```{r}
 st_write(chicago_transit_acs_tif_aug, "chicago_transit_acs_tif_aug.geojson")
@@ -359,3 +466,10 @@ cluster_spend %>%
   group_by(means_3)
 ```
 
+```{r}
+
+```
+
+# Ethics
+
+TIF district based economic policy tends to have a lot of supply side economics to it. Therefore no matter how one tries to optimize the immediate benefits of the policy will be on those who have the ability to participate in development and the decisions thereof, in other words, land owners, shareholders, corporate managers, etc. On the technical side of things, there are plenty of ways to change the hypothesis space or the model that determines the economic zones. The choice of variables can be chosen to reflect more of industrial supply side of economic, like the value of exports from an area, as opposed to more consumer or residential related statistics.
